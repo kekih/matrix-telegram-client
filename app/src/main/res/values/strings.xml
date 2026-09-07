@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Matrix Telegram</string>
+    <string name="login_title">Вход</string>
+    <string name="homeserver">Homeserver</string>
+    <string name="username">Username / MXID</string>
+    <string name="password">Пароль Matrix</string>
+    <string name="master_password">Мастер-пароль vault</string>
+    <string name="master_password_hint">Argon2id → AES-256-GCM (локально)</string>
+    <string name="login_button">Войти</string>
+    <string name="logout">Выйти</string>
+    <string name="search">Поиск</string>
+    <string name="type_message">Сообщение</string>
+    <string name="no_chats">Нет чатов</string>
+    <string name="select_chat">Выберите чат</string>
+</resources>

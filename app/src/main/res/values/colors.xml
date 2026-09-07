@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Telegram-inspired dark palette -->
+    <color name="tg_bg">#FF0E1621</color>
+    <color name="tg_sidebar">#FF17212B</color>
+    <color name="tg_chat">#FF0E1621</color>
+    <color name="tg_bubble_out">#FF2B5278</color>
+    <color name="tg_bubble_in">#FF182533</color>
+    <color name="tg_accent">#FF2AABEE</color>
+    <color name="tg_text_primary">#FFF5F5F5</color>
+    <color name="tg_text_secondary">#FF7D8B99</color>
+    <color name="tg_text_meta">#FF6D7F8F</color>
+    <color name="tg_input">#FF242F3D</color>
+    <color name="tg_hover">#FF232E3C</color>
+    <color name="tg_divider">#FF0E1621</color>
+</resources>
