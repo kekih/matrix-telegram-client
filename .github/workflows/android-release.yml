@@ -20,13 +20,18 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+          yes | sdkmanager --licenses || true
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -36,7 +41,11 @@ jobs:
       - name: Create local.properties
         run: |
           echo "sdk.dir=$ANDROID_HOME" > local.properties
-          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "=== local.properties ==="
+          cat local.properties
+          echo "=== ANDROID_HOME ==="
+          echo $ANDROID_HOME
+          ls -la $ANDROID_HOME/platforms || true
 
       - name: Generate Gradle Wrapper (if missing)
         run: |
@@ -44,16 +53,25 @@ jobs:
             gradle wrapper --gradle-version 8.9
           fi
           chmod +x gradlew
+          ls -la gradlew gradle/wrapper/ || true
 
       - name: Build Debug APK
-        run: ./gradlew :app:assembleDebug --stacktrace --no-daemon
+        run: ./gradlew :app:assembleDebug --stacktrace --info --no-daemon 2>&1 | tee build.log
+        continue-on-error: false
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
 
       - name: Build Release APK (unsigned)
         run: ./gradlew :app:assembleRelease --stacktrace --no-daemon
         continue-on-error: true
 
       - name: List outputs
-        run: find app/build/outputs -type f -name "*.apk" || true
+        run: find app/build/outputs -type f -name "*.apk" 2>/dev/null || echo "No APKs found"
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
