@@ -10,8 +10,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // matrix-rust-sdk artifacts when available
-        maven { url = uri("https://gitlab.matrix.org/api/v4/projects/27/packages/maven") }
     }
 }
 
