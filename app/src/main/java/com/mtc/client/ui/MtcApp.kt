@@ -1,35 +1,94 @@
 package com.mtc.client.ui
 
+import android.app.Application
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.mtc.client.ui.chat.ChatListScreen
 import com.mtc.client.ui.chat.ChatScreen
-import com.mtc.client.ui.login.LoginScreen
+import com.mtc.client.ui.login.*
 
 @Composable
-fun MtcApp() {
-    var isLoggedIn by remember { mutableStateOf(false) }
-    val navController = rememberNavController()
-
-    if (!isLoggedIn) {
-        LoginScreen(onLoginSuccess = { isLoggedIn = true })
-    } else {
-        NavHost(navController = navController, startDestination = "chats") {
-            composable("chats") {
-                ChatListScreen(
-                    onChatClick = { roomId -> navController.navigate("chat/$roomId") },
-                    onLogout = { isLoggedIn = false }
-                )
+fun MtcApp(
+    authViewModel: AuthViewModel = viewModel(
+        factory = viewModelFactory {
+            initializer {
+                val app = this[androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as Application
+                AuthViewModel(app)
             }
-            composable("chat/{roomId}") { backStackEntry ->
-                val roomId = backStackEntry.arguments?.getString("roomId") ?: return@composable
-                ChatScreen(roomId = roomId, onBack = { navController.popBackStack() })
+        }
+    )
+) {
+    val state by authViewModel.state.collectAsState()
+    val context = LocalContext.current
+
+    when (state.step) {
+        AuthStep.PROVIDER -> AccountProviderScreen(
+            isLoading = state.isLoading,
+            error = state.error,
+            onContinue = { authViewModel.discover(it) }
+        )
+
+        AuthStep.METHODS -> LoginMethodsScreen(
+            serverName = state.homeserver?.serverName ?: state.providerInput,
+            hasPassword = authViewModel.hasPasswordFlow(),
+            hasSso = authViewModel.hasSsoFlow(),
+            identityProviders = authViewModel.identityProviders(),
+            isLoading = state.isLoading,
+            error = state.error,
+            onBack = { authViewModel.backToProvider() },
+            onPasswordLogin = { authViewModel.goPassword() },
+            onRegister = { authViewModel.goRegister() },
+            onSso = { idp -> authViewModel.startSso(context, idp) }
+        )
+
+        AuthStep.PASSWORD -> PasswordAuthScreen(
+            isRegister = false,
+            serverName = state.homeserver?.serverName ?: "",
+            isLoading = state.isLoading,
+            error = state.error,
+            onBack = { authViewModel.backToMethods() },
+            onSubmit = { u, p -> authViewModel.loginPassword(u, p) }
+        )
+
+        AuthStep.REGISTER -> PasswordAuthScreen(
+            isRegister = true,
+            serverName = state.homeserver?.serverName ?: "",
+            isLoading = state.isLoading,
+            error = state.error,
+            onBack = { authViewModel.backToMethods() },
+            onSubmit = { u, p -> authViewModel.register(u, p) }
+        )
+
+        AuthStep.LOGGED_IN -> {
+            val navController = rememberNavController()
+            val session = state.session
+            NavHost(navController = navController, startDestination = "chats") {
+                composable("chats") {
+                    ChatListScreen(
+                        userId = session?.userId ?: "",
+                        rooms = state.rooms,
+                        onChatClick = { roomId -> navController.navigate("chat/$roomId") },
+                        onLogout = { authViewModel.logout() },
+                        onRefresh = { authViewModel.refreshRooms() }
+                    )
+                }
+                composable("chat/{roomId}") { backStackEntry ->
+                    val roomId = backStackEntry.arguments?.getString("roomId") ?: return@composable
+                    val room = state.rooms.find { it.roomId == roomId }
+                    ChatScreen(
+                        roomId = roomId,
+                        roomName = room?.name ?: roomId,
+                        onBack = { navController.popBackStack() }
+                    )
+                }
             }
         }
     }

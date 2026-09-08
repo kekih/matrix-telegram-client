@@ -20,27 +20,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mtc.client.matrix.RoomSummary
 import com.mtc.client.ui.theme.*
-
-data class ChatPreview(
-    val roomId: String,
-    val name: String,
-    val lastMessage: String,
-    val time: String,
-    val unread: Int = 0
-)
-
-private val demoChats = listOf(
-    ChatPreview("!room1:matrix.org", "Matrix HQ", "Welcome to the community!", "12:40", 3),
-    ChatPreview("!room2:matrix.org", "Element X", "Sliding Sync is amazing", "11:15"),
-    ChatPreview("!room3:matrix.org", "Crypto chat", "Olm + Megolm discussion", "Вчера", 1),
-    ChatPreview("!room4:matrix.org", "Telegram design", "How close can we get?", "Пн"),
-)
+import java.text.SimpleDateFormat
+import java.util.*
 
 @Composable
 fun ChatListScreen(
+    userId: String,
+    rooms: List<RoomSummary>,
     onChatClick: (String) -> Unit,
-    onLogout: () -> Unit
+    onLogout: () -> Unit,
+    onRefresh: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -58,12 +49,25 @@ fun ChatListScreen(
                 modifier = Modifier.size(42.dp).clip(CircleShape).background(TgAccent),
                 contentAlignment = Alignment.Center
             ) {
-                Text("M", color = Color.White, fontWeight = FontWeight.Bold)
+                Text(
+                    text = userId.removePrefix("@").take(1).uppercase().ifEmpty { "M" },
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold
+                )
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text("Matrix Telegram", color = TgTextPrimary, fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = userId.ifBlank { "Matrix Telegram" },
+                    color = TgTextPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
                 Text("online", color = TgTextSecondary, fontSize = 12.sp)
+            }
+            IconButton(onClick = onRefresh) {
+                Text("⟳", color = TgTextSecondary, fontSize = 18.sp)
             }
             IconButton(onClick = onLogout) {
                 Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Выйти", tint = TgTextSecondary)
@@ -87,16 +91,30 @@ fun ChatListScreen(
             )
         )
 
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
-            items(demoChats) { chat ->
-                ChatListItem(chat = chat, onClick = { onChatClick(chat.roomId) })
+        if (rooms.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    "Нет комнат или идёт синхронизация…\nПотяните обновление (⟳)",
+                    color = TgTextSecondary,
+                    fontSize = 14.sp
+                )
+            }
+        } else {
+            LazyColumn(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
+                items(rooms, key = { it.roomId }) { room ->
+                    RoomItem(room, onClick = { onChatClick(room.roomId) })
+                }
             }
         }
     }
 }
 
 @Composable
-private fun ChatListItem(chat: ChatPreview, onClick: () -> Unit) {
+private fun RoomItem(room: RoomSummary, onClick: () -> Unit) {
+    val timeLabel = if (room.timestamp > 0) {
+        SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(room.timestamp))
+    } else ""
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -108,22 +126,45 @@ private fun ChatListItem(chat: ChatPreview, onClick: () -> Unit) {
             modifier = Modifier.size(52.dp).clip(CircleShape).background(TgInput),
             contentAlignment = Alignment.Center
         ) {
-            Text(chat.name.take(1).uppercase(), color = TgTextPrimary, fontWeight = FontWeight.Medium, fontSize = 18.sp)
+            Text(
+                room.name.take(1).uppercase(),
+                color = TgTextPrimary,
+                fontWeight = FontWeight.Medium,
+                fontSize = 18.sp
+            )
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(chat.name, color = TgTextPrimary, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                Text(chat.time, color = TgTextMeta, fontSize = 12.sp)
+                Text(
+                    room.name,
+                    color = TgTextPrimary,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(timeLabel, color = TgTextMeta, fontSize = 12.sp)
             }
             Spacer(Modifier.height(2.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(chat.lastMessage, color = TgTextSecondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                if (chat.unread > 0) {
+                Text(
+                    room.lastMessage.ifBlank { "Нет сообщений" },
+                    color = TgTextSecondary,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (room.unread > 0) {
                     Box(
-                        modifier = Modifier.padding(start = 6.dp).clip(CircleShape).background(TgAccent).padding(horizontal = 6.dp, vertical = 2.dp)
+                        modifier = Modifier
+                            .padding(start = 6.dp)
+                            .clip(CircleShape)
+                            .background(TgAccent)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
-                        Text(chat.unread.toString(), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                        Text(room.unread.toString(), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Medium)
                     }
                 }
             }
