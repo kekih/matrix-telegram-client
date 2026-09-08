@@ -31,13 +31,16 @@ fun MtcApp(authViewModel: AuthViewModel) {
             serverName = state.homeserver?.serverName ?: state.providerInput,
             hasPassword = authViewModel.hasPasswordFlow(),
             hasSso = authViewModel.hasSsoFlow(),
+            usesOidc = authViewModel.usesOidc(),
             identityProviders = authViewModel.identityProviders(),
             isLoading = state.isLoading,
             error = state.error,
             onBack = { authViewModel.backToProvider() },
             onPasswordLogin = { authViewModel.goPassword() },
             onRegister = { authViewModel.goRegister() },
-            onSso = { idp -> authViewModel.startSso(context, idp) }
+            onSso = { idp -> authViewModel.startSso(context, idp) },
+            onOidcLogin = { authViewModel.startOidc(context, forRegistration = false) },
+            onOidcRegister = { authViewModel.startOidc(context, forRegistration = true) }
         )
 
         AuthStep.PASSWORD -> PasswordAuthScreen(

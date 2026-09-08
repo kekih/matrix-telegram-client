@@ -21,13 +21,16 @@ fun LoginMethodsScreen(
     serverName: String,
     hasPassword: Boolean,
     hasSso: Boolean,
+    usesOidc: Boolean = false,
     identityProviders: List<IdentityProvider>,
     isLoading: Boolean,
     error: String?,
     onBack: () -> Unit,
     onPasswordLogin: () -> Unit,
     onRegister: () -> Unit,
-    onSso: (IdentityProvider?) -> Unit
+    onSso: (IdentityProvider?) -> Unit,
+    onOidcLogin: () -> Unit = {},
+    onOidcRegister: () -> Unit = {}
 ) {
     Column(
         modifier = Modifier
@@ -54,7 +57,7 @@ fun LoginMethodsScreen(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "Выберите способ входа",
+                text = if (usesOidc) "Вход через OIDC (как Element X)" else "Выберите способ входа",
                 color = TgTextSecondary,
                 fontSize = 14.sp,
                 modifier = Modifier.padding(top = 8.dp)
@@ -62,38 +65,56 @@ fun LoginMethodsScreen(
 
             Spacer(Modifier.height(32.dp))
 
-            if (hasSso) {
-                if (identityProviders.isEmpty()) {
-                    AuthButton(
-                        text = "Continue with SSO",
-                        onClick = { onSso(null) },
-                        enabled = !isLoading
-                    )
-                    Spacer(Modifier.height(12.dp))
-                } else {
-                    identityProviders.forEach { idp ->
+            if (usesOidc) {
+                AuthButton(
+                    text = "Продолжить (SSO / OIDC)",
+                    onClick = onOidcLogin,
+                    enabled = !isLoading
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = onOidcRegister,
+                    enabled = !isLoading,
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = TgTextPrimary)
+                ) {
+                    Text("Создать аккаунт")
+                }
+            } else {
+                if (hasSso) {
+                    if (identityProviders.isEmpty()) {
                         AuthButton(
-                            text = "Continue with ${idp.name}",
-                            onClick = { onSso(idp) },
+                            text = "Continue with SSO",
+                            onClick = { onSso(null) },
                             enabled = !isLoading
                         )
                         Spacer(Modifier.height(12.dp))
+                    } else {
+                        identityProviders.forEach { idp ->
+                            AuthButton(
+                                text = "Continue with ${idp.name}",
+                                onClick = { onSso(idp) },
+                                enabled = !isLoading
+                            )
+                            Spacer(Modifier.height(12.dp))
+                        }
                     }
                 }
-            }
 
-            if (hasPassword) {
-                AuthButton(
-                    text = "Войти с паролем",
-                    onClick = onPasswordLogin,
-                    enabled = !isLoading,
-                    outlined = hasSso
-                )
-                Spacer(Modifier.height(12.dp))
-            }
+                if (hasPassword) {
+                    AuthButton(
+                        text = "Войти с паролем",
+                        onClick = onPasswordLogin,
+                        enabled = !isLoading,
+                        outlined = hasSso
+                    )
+                    Spacer(Modifier.height(12.dp))
+                }
 
-            TextButton(onClick = onRegister, enabled = !isLoading) {
-                Text("Создать аккаунт", color = TgAccent)
+                TextButton(onClick = onRegister, enabled = !isLoading) {
+                    Text("Создать аккаунт", color = TgAccent)
+                }
             }
 
             if (error != null) {
