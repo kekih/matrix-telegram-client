@@ -16,7 +16,6 @@ import java.util.concurrent.TimeUnit
 data class HomeserverConfig(
     val baseUrl: String,
     val serverName: String,
-    /** MSC3861 OIDC issuer, if homeserver uses modern auth */
     val oidcIssuer: String? = null
 ) {
     val usesOidc: Boolean get() = !oidcIssuer.isNullOrBlank()
@@ -48,6 +47,22 @@ data class RoomSummary(
     val unread: Int
 )
 
+data class ChatMessage(
+    val eventId: String,
+    val sender: String,
+    val body: String,
+    val timestamp: Long,
+    val isMine: Boolean,
+    val isEncrypted: Boolean = false,
+    val isState: Boolean = false
+)
+
+data class UserProfile(
+    val userId: String,
+    val displayName: String?,
+    val avatarUrl: String?
+)
+
 class MatrixClient(
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -70,13 +85,9 @@ class MatrixClient(
             val obj = JSONObject(body)
             val hs = obj.optJSONObject("m.homeserver")?.optString("base_url")?.trimEnd('/')
             if (!hs.isNullOrBlank()) baseUrl = hs
-
-            // Element X / MAS style
             val msc3861 = obj.optJSONObject("org.matrix.msc3861.authentication")
             oidcIssuer = msc3861?.optString("issuer")?.trimEnd('/')?.takeIf { it.isNotBlank() }
-
             if (oidcIssuer == null) {
-                // Try unstable auth_issuer
                 try {
                     val issuerBody = get("$baseUrl/_matrix/client/unstable/org.matrix.msc2965/auth_issuer")
                     oidcIssuer = JSONObject(issuerBody).optString("issuer")
@@ -111,17 +122,13 @@ class MatrixClient(
                     add(LoginFlow(type = type, identityProviders = idps))
                 }
             }
-        } catch (e: MatrixApiException) {
-            // M_UNRECOGNIZED = classic login disabled (OIDC-only homeserver)
+        } catch (_: MatrixApiException) {
             emptyList()
         }
     }
 
     suspend fun loginPassword(
-        baseUrl: String,
-        user: String,
-        password: String,
-        deviceName: String = "Matrix Telegram"
+        baseUrl: String, user: String, password: String, deviceName: String = "Matrix Telegram"
     ): MatrixSession = withContext(Dispatchers.IO) {
         val localpart = user.removePrefix("@").substringBefore(":")
         val identifier = JSONObject().put("type", "m.id.user").put("user", localpart)
@@ -134,9 +141,7 @@ class MatrixClient(
     }
 
     suspend fun loginWithToken(
-        baseUrl: String,
-        loginToken: String,
-        deviceName: String = "Matrix Telegram"
+        baseUrl: String, loginToken: String, deviceName: String = "Matrix Telegram"
     ): MatrixSession = withContext(Dispatchers.IO) {
         val req = JSONObject()
             .put("type", "m.login.token")
@@ -155,10 +160,7 @@ class MatrixClient(
     }
 
     suspend fun register(
-        baseUrl: String,
-        username: String,
-        password: String,
-        deviceName: String = "Matrix Telegram"
+        baseUrl: String, username: String, password: String, deviceName: String = "Matrix Telegram"
     ): MatrixSession = withContext(Dispatchers.IO) {
         val initial = JSONObject()
             .put("username", username)
@@ -197,28 +199,22 @@ class MatrixClient(
             val keys = join.keys()
             while (keys.hasNext()) {
                 val roomId = keys.next()
-                add(parseRoomFromSync(roomId, join.getJSONObject(roomId)))
+                add(parseRoomFromSync(roomId, join.getJSONObject(roomId), session.userId))
             }
         }.sortedByDescending { it.timestamp }
     }
 
-    private fun parseRoomFromSync(roomId: String, room: JSONObject): RoomSummary {
+    private fun parseRoomFromSync(roomId: String, room: JSONObject, myUserId: String): RoomSummary {
         var lastMsg = ""
         var ts = 0L
         val timeline = room.optJSONObject("timeline")?.optJSONArray("events")
         if (timeline != null && timeline.length() > 0) {
             val ev = timeline.getJSONObject(timeline.length() - 1)
             ts = ev.optLong("origin_server_ts", 0L)
-            val content = ev.optJSONObject("content")
-            lastMsg = when {
-                content == null -> ev.optString("type", "")
-                content.has("body") -> content.optString("body")
-                content.has("membership") -> content.optString("membership")
-                else -> ev.optString("type", "")
-            }
+            lastMsg = previewForEvent(ev)
         }
         val stateEvents = room.optJSONObject("state")?.optJSONArray("events")
-        val name = resolveName(roomId, stateEvents, room.optJSONObject("summary"))
+        val name = resolveName(roomId, stateEvents, room.optJSONObject("summary"), myUserId)
         val unread = room.optJSONObject("unread_notifications")
             ?.optInt("notification_count", 0) ?: 0
         return RoomSummary(roomId, name, lastMsg, ts, unread)
@@ -237,22 +233,23 @@ class MatrixClient(
                     try {
                         fetchRoomSummary(session, roomId)
                     } catch (_: Exception) {
-                        RoomSummary(roomId, roomId, "", 0L, 0)
+                        RoomSummary(roomId, shortRoomId(roomId), "", 0L, 0)
                     }
                 }
             }.awaitAll().sortedByDescending { it.timestamp }
         }
 
     private fun fetchRoomSummary(session: MatrixSession, roomId: String): RoomSummary {
-        val encoded = java.net.URLEncoder.encode(roomId, Charsets.UTF_8.name())
-        var name = roomId
+        val encoded = enc(roomId)
+        var name = shortRoomId(roomId)
         try {
             val stateBody = get(
                 "${session.homeserverUrl}/_matrix/client/v3/rooms/$encoded/state",
                 session.accessToken
             )
-            name = resolveName(roomId, JSONArray(stateBody), null)
+            name = resolveName(roomId, JSONArray(stateBody), null, session.userId)
         } catch (_: Exception) { }
+
         var lastMsg = ""
         var ts = 0L
         try {
@@ -264,14 +261,198 @@ class MatrixClient(
             if (chunk != null && chunk.length() > 0) {
                 val ev = chunk.getJSONObject(0)
                 ts = ev.optLong("origin_server_ts", 0L)
-                lastMsg = ev.optJSONObject("content")?.optString("body")
-                    ?: ev.optString("type", "")
+                lastMsg = previewForEvent(ev)
             }
         } catch (_: Exception) { }
         return RoomSummary(roomId, name, lastMsg, ts, 0)
     }
 
-    private fun resolveName(roomId: String, stateEvents: JSONArray?, summary: JSONObject?): String {
+    suspend fun loadMessages(
+        session: MatrixSession,
+        roomId: String,
+        limit: Int = 50
+    ): List<ChatMessage> = withContext(Dispatchers.IO) {
+        val encoded = enc(roomId)
+        val body = get(
+            "${session.homeserverUrl}/_matrix/client/v3/rooms/$encoded/messages?dir=b&limit=$limit",
+            session.accessToken
+        )
+        val chunk = JSONObject(body).optJSONArray("chunk") ?: JSONArray()
+        buildList {
+            for (i in 0 until chunk.length()) {
+                val ev = chunk.getJSONObject(i)
+                val type = ev.optString("type")
+                val sender = ev.optString("sender")
+                val ts = ev.optLong("origin_server_ts", 0L)
+                val eventId = ev.optString("event_id", "$i")
+                val content = ev.optJSONObject("content")
+                when (type) {
+                    "m.room.message" -> {
+                        val bodyText = content?.optString("body").orEmpty()
+                        add(
+                            ChatMessage(
+                                eventId = eventId,
+                                sender = sender,
+                                body = bodyText,
+                                timestamp = ts,
+                                isMine = sender == session.userId
+                            )
+                        )
+                    }
+                    "m.room.encrypted" -> {
+                        add(
+                            ChatMessage(
+                                eventId = eventId,
+                                sender = sender,
+                                body = "🔒 Зашифрованное сообщение",
+                                timestamp = ts,
+                                isMine = sender == session.userId,
+                                isEncrypted = true
+                            )
+                        )
+                    }
+                    else -> {
+                        // skip pure state noise in chat, or show briefly
+                        if (type.startsWith("m.room.") && type != "m.room.message") {
+                            val label = stateLabel(type, content)
+                            if (label != null) {
+                                add(
+                                    ChatMessage(
+                                        eventId = eventId,
+                                        sender = sender,
+                                        body = label,
+                                        timestamp = ts,
+                                        isMine = false,
+                                        isState = true
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }.reversed() // chronological
+    }
+
+    suspend fun sendText(session: MatrixSession, roomId: String, text: String) =
+        withContext(Dispatchers.IO) {
+            val txn = System.currentTimeMillis().toString()
+            val encoded = enc(roomId)
+            val req = JSONObject().put("msgtype", "m.text").put("body", text)
+            put(
+                "${session.homeserverUrl}/_matrix/client/v3/rooms/$encoded/send/m.room.message/$txn",
+                req.toString(),
+                session.accessToken
+            )
+        }
+
+    suspend fun getProfile(session: MatrixSession, userId: String = session.userId): UserProfile =
+        withContext(Dispatchers.IO) {
+            val encoded = enc(userId)
+            try {
+                val body = get(
+                    "${session.homeserverUrl}/_matrix/client/v3/profile/$encoded",
+                    session.accessToken
+                )
+                val o = JSONObject(body)
+                UserProfile(
+                    userId = userId,
+                    displayName = o.optString("displayname").takeIf { it.isNotBlank() },
+                    avatarUrl = o.optString("avatar_url").takeIf { it.isNotBlank() }
+                )
+            } catch (_: Exception) {
+                UserProfile(userId, null, null)
+            }
+        }
+
+    suspend fun setDisplayName(session: MatrixSession, name: String) = withContext(Dispatchers.IO) {
+        val encoded = enc(session.userId)
+        val req = JSONObject().put("displayname", name)
+        put(
+            "${session.homeserverUrl}/_matrix/client/v3/profile/$encoded/displayname",
+            req.toString(),
+            session.accessToken
+        )
+    }
+
+    /** Upload raw bytes as media, returns mxc:// URI */
+    suspend fun uploadAvatar(
+        session: MatrixSession,
+        bytes: ByteArray,
+        contentType: String = "image/jpeg"
+    ): String = withContext(Dispatchers.IO) {
+        val mediaType = contentType.toMediaType()
+        val req = Request.Builder()
+            .url("${session.homeserverUrl}/_matrix/media/v3/upload")
+            .header("Authorization", "Bearer ${session.accessToken}")
+            .header("Content-Type", contentType)
+            .post(bytes.toRequestBody(mediaType))
+            .build()
+        http.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) error("Upload failed: HTTP ${resp.code}")
+            JSONObject(body).getString("content_uri")
+        }
+    }
+
+    suspend fun setAvatarUrl(session: MatrixSession, mxcUrl: String) = withContext(Dispatchers.IO) {
+        val encoded = enc(session.userId)
+        val req = JSONObject().put("avatar_url", mxcUrl)
+        put(
+            "${session.homeserverUrl}/_matrix/client/v3/profile/$encoded/avatar_url",
+            req.toString(),
+            session.accessToken
+        )
+    }
+
+    fun mxcToHttp(session: MatrixSession, mxc: String?): String? {
+        if (mxc.isNullOrBlank() || !mxc.startsWith("mxc://")) return null
+        val path = mxc.removePrefix("mxc://")
+        return "${session.homeserverUrl}/_matrix/media/v3/thumbnail/$path?width=96&height=96&method=crop"
+    }
+
+    private fun previewForEvent(ev: JSONObject): String {
+        val type = ev.optString("type")
+        val content = ev.optJSONObject("content")
+        return when (type) {
+            "m.room.message" -> content?.optString("body")?.take(120) ?: "Сообщение"
+            "m.room.encrypted" -> "🔒 Зашифрованное сообщение"
+            "m.room.member" -> {
+                val m = content?.optString("membership")
+                val dn = content?.optString("displayname")
+                when (m) {
+                    "join" -> "${dn ?: "Участник"} вступил"
+                    "leave" -> "Выход из комнаты"
+                    "invite" -> "Приглашение"
+                    else -> m ?: "Участник"
+                }
+            }
+            "m.room.name" -> "Название: ${content?.optString("name") ?: ""}"
+            "m.room.topic" -> "Тема изменена"
+            "m.room.avatar" -> "Аватар комнаты"
+            "m.reaction" -> "Реакция"
+            else -> stateLabel(type, content) ?: "Событие"
+        }
+    }
+
+    private fun stateLabel(type: String, content: JSONObject?): String? = when (type) {
+        "m.room.encrypted" -> "🔒 Зашифровано"
+        "m.room.power_levels" -> "Права изменены"
+        "m.room.encryption" -> "Включено шифрование"
+        "m.room.create" -> "Комната создана"
+        "m.room.guest_access" -> null
+        "m.room.history_visibility" -> null
+        "m.room.join_rules" -> null
+        "org.matrix.msc3401.call.member" -> "Звонок"
+        else -> null
+    }
+
+    private fun resolveName(
+        roomId: String,
+        stateEvents: JSONArray?,
+        summary: JSONObject?,
+        myUserId: String
+    ): String {
         if (stateEvents != null) {
             for (i in 0 until stateEvents.length()) {
                 val ev = stateEvents.getJSONObject(i)
@@ -287,11 +468,36 @@ class MatrixClient(
                     if (!a.isNullOrBlank()) return a
                 }
             }
+            // DM: use other member displayname
+            val members = mutableListOf<Pair<String, String>>()
+            for (i in 0 until stateEvents.length()) {
+                val ev = stateEvents.getJSONObject(i)
+                if (ev.optString("type") == "m.room.member" &&
+                    ev.optJSONObject("content")?.optString("membership") == "join"
+                ) {
+                    val uid = ev.optString("state_key")
+                    val dn = ev.optJSONObject("content")?.optString("displayname")
+                        ?.takeIf { it.isNotBlank() } ?: uid.removePrefix("@").substringBefore(":")
+                    if (uid.isNotBlank()) members += uid to dn
+                }
+            }
+            val others = members.filter { it.first != myUserId }
+            if (others.size == 1) return others[0].second
+            if (others.isNotEmpty() && others.size <= 3) {
+                return others.joinToString(", ") { it.second }
+            }
         }
         val heroes = summary?.optJSONArray("m.heroes")
-        if (heroes != null && heroes.length() > 0) return heroes.getString(0)
-        return roomId
+        if (heroes != null && heroes.length() > 0) {
+            return heroes.getString(0).removePrefix("@").substringBefore(":")
+        }
+        return shortRoomId(roomId)
     }
+
+    private fun shortRoomId(roomId: String): String =
+        if (roomId.length > 18) roomId.take(12) + "…" else roomId
+
+    private fun enc(s: String) = java.net.URLEncoder.encode(s, Charsets.UTF_8.name())
 
     private fun get(url: String, token: String? = null): String {
         val b = Request.Builder().url(url).get()
@@ -301,6 +507,12 @@ class MatrixClient(
 
     private fun post(url: String, json: String, token: String? = null): String {
         val b = Request.Builder().url(url).post(json.toRequestBody(jsonMedia))
+        if (token != null) b.header("Authorization", "Bearer $token")
+        return execute(b.build())
+    }
+
+    private fun put(url: String, json: String, token: String? = null): String {
+        val b = Request.Builder().url(url).put(json.toRequestBody(jsonMedia))
         if (token != null) b.header("Authorization", "Bearer $token")
         return execute(b.build())
     }
