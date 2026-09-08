@@ -15,8 +15,12 @@ import java.util.concurrent.TimeUnit
 
 data class HomeserverConfig(
     val baseUrl: String,
-    val serverName: String
-)
+    val serverName: String,
+    /** MSC3861 OIDC issuer, if homeserver uses modern auth */
+    val oidcIssuer: String? = null
+) {
+    val usesOidc: Boolean get() = !oidcIssuer.isNullOrBlank()
+}
 
 data class LoginFlow(
     val type: String,
@@ -58,39 +62,58 @@ class MatrixClient(
             .removePrefix("http://")
             .trimEnd('/')
 
+        var baseUrl = "https://$cleaned"
+        var oidcIssuer: String? = null
+
         try {
             val body = get("https://$cleaned/.well-known/matrix/client")
-            val hs = JSONObject(body).optJSONObject("m.homeserver")
-                ?.optString("base_url")?.trimEnd('/')
-            if (!hs.isNullOrBlank()) {
-                return@withContext HomeserverConfig(baseUrl = hs, serverName = cleaned)
+            val obj = JSONObject(body)
+            val hs = obj.optJSONObject("m.homeserver")?.optString("base_url")?.trimEnd('/')
+            if (!hs.isNullOrBlank()) baseUrl = hs
+
+            // Element X / MAS style
+            val msc3861 = obj.optJSONObject("org.matrix.msc3861.authentication")
+            oidcIssuer = msc3861?.optString("issuer")?.trimEnd('/')?.takeIf { it.isNotBlank() }
+
+            if (oidcIssuer == null) {
+                // Try unstable auth_issuer
+                try {
+                    val issuerBody = get("$baseUrl/_matrix/client/unstable/org.matrix.msc2965/auth_issuer")
+                    oidcIssuer = JSONObject(issuerBody).optString("issuer")
+                        .trimEnd('/').takeIf { it.isNotBlank() }
+                } catch (_: Exception) { }
             }
         } catch (_: Exception) { }
 
-        HomeserverConfig(baseUrl = "https://$cleaned", serverName = cleaned)
+        HomeserverConfig(baseUrl = baseUrl, serverName = cleaned, oidcIssuer = oidcIssuer)
     }
 
     suspend fun getLoginFlows(baseUrl: String): List<LoginFlow> = withContext(Dispatchers.IO) {
-        val body = get("$baseUrl/_matrix/client/v3/login")
-        val flows = JSONObject(body).optJSONArray("flows") ?: JSONArray()
-        buildList {
-            for (i in 0 until flows.length()) {
-                val f = flows.getJSONObject(i)
-                val type = f.getString("type")
-                val idps = mutableListOf<IdentityProvider>()
-                val idpArr = f.optJSONArray("identity_providers")
-                if (idpArr != null) {
-                    for (j in 0 until idpArr.length()) {
-                        val p = idpArr.getJSONObject(j)
-                        idps += IdentityProvider(
-                            id = p.optString("id", ""),
-                            name = p.optString("name", p.optString("id", "SSO")),
-                            icon = p.optString("icon").takeIf { it.isNotBlank() }
-                        )
+        try {
+            val body = get("$baseUrl/_matrix/client/v3/login")
+            val flows = JSONObject(body).optJSONArray("flows") ?: JSONArray()
+            buildList {
+                for (i in 0 until flows.length()) {
+                    val f = flows.getJSONObject(i)
+                    val type = f.getString("type")
+                    val idps = mutableListOf<IdentityProvider>()
+                    val idpArr = f.optJSONArray("identity_providers")
+                    if (idpArr != null) {
+                        for (j in 0 until idpArr.length()) {
+                            val p = idpArr.getJSONObject(j)
+                            idps += IdentityProvider(
+                                id = p.optString("id", ""),
+                                name = p.optString("name", p.optString("id", "SSO")),
+                                icon = p.optString("icon").takeIf { it.isNotBlank() }
+                            )
+                        }
                     }
+                    add(LoginFlow(type = type, identityProviders = idps))
                 }
-                add(LoginFlow(type = type, identityProviders = idps))
             }
+        } catch (e: MatrixApiException) {
+            // M_UNRECOGNIZED = classic login disabled (OIDC-only homeserver)
+            emptyList()
         }
     }
 
@@ -157,32 +180,24 @@ class MatrixClient(
         }
     }
 
-    /**
-     * Load rooms: try /sync, fall back to /joined_rooms + per-room state.
-     */
     suspend fun loadRooms(session: MatrixSession): List<RoomSummary> = withContext(Dispatchers.IO) {
         try {
             val fromSync = syncRooms(session)
             if (fromSync.isNotEmpty()) return@withContext fromSync
         } catch (_: Exception) { }
-
         loadRoomsViaJoined(session)
     }
 
     private fun syncRooms(session: MatrixSession): List<RoomSummary> {
-        // Minimal filter as JSON in query can break some proxies — use plain sync first
         val url = "${session.homeserverUrl}/_matrix/client/v3/sync?timeout=0"
         val body = get(url, session.accessToken)
-        val root = JSONObject(body)
-        val join = root.optJSONObject("rooms")?.optJSONObject("join")
+        val join = JSONObject(body).optJSONObject("rooms")?.optJSONObject("join")
             ?: return emptyList()
-
         return buildList {
             val keys = join.keys()
             while (keys.hasNext()) {
                 val roomId = keys.next()
-                val room = join.getJSONObject(roomId)
-                add(parseRoomFromSync(roomId, room))
+                add(parseRoomFromSync(roomId, join.getJSONObject(roomId)))
             }
         }.sortedByDescending { it.timestamp }
     }
@@ -202,19 +217,11 @@ class MatrixClient(
                 else -> ev.optString("type", "")
             }
         }
-
         val stateEvents = room.optJSONObject("state")?.optJSONArray("events")
         val name = resolveName(roomId, stateEvents, room.optJSONObject("summary"))
         val unread = room.optJSONObject("unread_notifications")
             ?.optInt("notification_count", 0) ?: 0
-
-        return RoomSummary(
-            roomId = roomId,
-            name = name,
-            lastMessage = lastMsg,
-            timestamp = ts,
-            unread = unread
-        )
+        return RoomSummary(roomId, name, lastMsg, ts, unread)
     }
 
     private suspend fun loadRoomsViaJoined(session: MatrixSession): List<RoomSummary> =
@@ -225,8 +232,6 @@ class MatrixClient(
             )
             val arr = JSONObject(body).optJSONArray("joined_rooms") ?: JSONArray()
             val ids = (0 until arr.length()).map { arr.getString(it) }
-
-            // Cap parallel lookups to avoid hammering the server
             ids.take(80).map { roomId ->
                 async {
                     try {
@@ -240,19 +245,14 @@ class MatrixClient(
 
     private fun fetchRoomSummary(session: MatrixSession, roomId: String): RoomSummary {
         val encoded = java.net.URLEncoder.encode(roomId, Charsets.UTF_8.name())
-
-        // Name from state
         var name = roomId
         try {
             val stateBody = get(
                 "${session.homeserverUrl}/_matrix/client/v3/rooms/$encoded/state",
                 session.accessToken
             )
-            val events = JSONArray(stateBody)
-            name = resolveName(roomId, events, null)
+            name = resolveName(roomId, JSONArray(stateBody), null)
         } catch (_: Exception) { }
-
-        // Last message from messages API
         var lastMsg = ""
         var ts = 0L
         try {
@@ -268,7 +268,6 @@ class MatrixClient(
                     ?: ev.optString("type", "")
             }
         } catch (_: Exception) { }
-
         return RoomSummary(roomId, name, lastMsg, ts, 0)
     }
 
@@ -290,23 +289,9 @@ class MatrixClient(
             }
         }
         val heroes = summary?.optJSONArray("m.heroes")
-        if (heroes != null && heroes.length() > 0) {
-            return heroes.getString(0)
-        }
+        if (heroes != null && heroes.length() > 0) return heroes.getString(0)
         return roomId
     }
-
-    suspend fun sendText(session: MatrixSession, roomId: String, text: String) =
-        withContext(Dispatchers.IO) {
-            val txn = System.currentTimeMillis().toString()
-            val encoded = java.net.URLEncoder.encode(roomId, Charsets.UTF_8.name())
-            val req = JSONObject().put("msgtype", "m.text").put("body", text)
-            put(
-                "${session.homeserverUrl}/_matrix/client/v3/rooms/$encoded/send/m.room.message/$txn",
-                req.toString(),
-                session.accessToken
-            )
-        }
 
     private fun get(url: String, token: String? = null): String {
         val b = Request.Builder().url(url).get()
@@ -316,12 +301,6 @@ class MatrixClient(
 
     private fun post(url: String, json: String, token: String? = null): String {
         val b = Request.Builder().url(url).post(json.toRequestBody(jsonMedia))
-        if (token != null) b.header("Authorization", "Bearer $token")
-        return execute(b.build())
-    }
-
-    private fun put(url: String, json: String, token: String? = null): String {
-        val b = Request.Builder().url(url).put(json.toRequestBody(jsonMedia))
         if (token != null) b.header("Authorization", "Bearer $token")
         return execute(b.build())
     }
