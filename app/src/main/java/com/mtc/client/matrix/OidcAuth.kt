@@ -13,6 +13,8 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 
+const val OIDC_REDIRECT_URI = "mtc://login"
+
 data class OidcConfig(
     val issuer: String,
     val authorizationEndpoint: String,
@@ -31,7 +33,7 @@ data class OidcPendingAuth(
     val homeserverUrl: String,
     val tokenEndpoint: String,
     val clientId: String,
-    val redirectUri: String = REDIRECT_URI
+    val redirectUri: String = OIDC_REDIRECT_URI
 )
 
 data class OidcTokens(
@@ -42,7 +44,7 @@ data class OidcTokens(
 )
 
 object OidcAuth {
-    const val REDIRECT_URI = "mtc://login"
+    const val REDIRECT_URI = OIDC_REDIRECT_URI
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -63,7 +65,6 @@ object OidcAuth {
         )
     }
 
-    /** Dynamic client registration (public native client, PKCE, no secret). */
     suspend fun registerClient(config: OidcConfig): OidcClient = withContext(Dispatchers.IO) {
         val endpoint = config.registrationEndpoint
             ?: error("Сервер не поддерживает dynamic client registration")
@@ -71,7 +72,7 @@ object OidcAuth {
         val meta = JSONObject()
             .put("application_type", "native")
             .put("client_name", "Matrix Telegram")
-            .put("redirect_uris", org.json.JSONArray().put(REDIRECT_URI))
+            .put("redirect_uris", org.json.JSONArray().put(OIDC_REDIRECT_URI))
             .put("token_endpoint_auth_method", "none")
             .put("grant_types", org.json.JSONArray().put("authorization_code").put("refresh_token"))
             .put("response_types", org.json.JSONArray().put("code"))
@@ -88,8 +89,7 @@ object OidcAuth {
                 val err = try { JSONObject(body).optString("error_description") } catch (_: Exception) { body }
                 error("OIDC registration failed: ${err.ifBlank { resp.code.toString() }}")
             }
-            val clientId = JSONObject(body).getString("client_id")
-            OidcClient(clientId = clientId)
+            OidcClient(clientId = JSONObject(body).getString("client_id"))
         }
     }
 
@@ -110,7 +110,6 @@ object OidcAuth {
         val state = randomUrlSafe(24)
         val deviceId = generateDeviceId()
 
-        // MSC2964 / MSC2967 scopes
         val scope = listOf(
             "openid",
             "urn:matrix:client:api:*",
@@ -120,7 +119,7 @@ object OidcAuth {
         val params = linkedMapOf(
             "response_type" to "code",
             "client_id" to clientId,
-            "redirect_uri" to REDIRECT_URI,
+            "redirect_uri" to OIDC_REDIRECT_URI,
             "scope" to scope,
             "state" to state,
             "code_challenge" to challenge,
@@ -182,7 +181,6 @@ object OidcAuth {
         }
     }
 
-    /** Who am I → user_id for session */
     suspend fun whoami(homeserverUrl: String, accessToken: String): String =
         withContext(Dispatchers.IO) {
             val req = Request.Builder()
