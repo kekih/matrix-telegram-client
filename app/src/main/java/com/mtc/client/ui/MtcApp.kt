@@ -1,31 +1,22 @@
 package com.mtc.client.ui
 
-import android.app.Application
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
-import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.lifecycle.viewmodel.initializer
-import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.mtc.client.ui.chat.ChatListScreen
 import com.mtc.client.ui.chat.ChatScreen
-import com.mtc.client.ui.login.*
+import com.mtc.client.ui.login.AccountProviderScreen
+import com.mtc.client.ui.login.AuthStep
+import com.mtc.client.ui.login.AuthViewModel
+import com.mtc.client.ui.login.LoginMethodsScreen
+import com.mtc.client.ui.login.PasswordAuthScreen
 
 @Composable
-fun MtcApp(
-    authViewModel: AuthViewModel = viewModel(
-        factory = viewModelFactory {
-            initializer {
-                val app = this[androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as Application
-                AuthViewModel(app)
-            }
-        }
-    )
-) {
+fun MtcApp(authViewModel: AuthViewModel) {
     val state by authViewModel.state.collectAsState()
     val context = LocalContext.current
 

@@ -14,8 +14,6 @@ android {
         targetSdk = 35
         versionCode = 2
         versionName = "0.2.0"
-
-        manifestPlaceholders["appAuthRedirectScheme"] = "mtc"
     }
 
     buildTypes {
@@ -44,17 +42,13 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
     implementation("androidx.navigation:navigation-compose:2.8.3")
 
-    // Network
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-
-    // Custom Tabs for SSO
     implementation("androidx.browser:browser:1.8.0")
-
-    // Secure session storage
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("androidx.security:security-crypto:1.0.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
