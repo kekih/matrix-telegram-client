@@ -14,7 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 enum class AuthStep {
-    PROVIDER, METHODS, PASSWORD, REGISTER, LOGGED_IN
+    PROVIDER, METHODS, PASSWORD, REGISTER, OIDC_WEB, LOGGED_IN
 }
 
 data class AuthUiState(
@@ -27,16 +27,16 @@ data class AuthUiState(
     val error: String? = null,
     val roomsError: String? = null,
     val session: MatrixSession? = null,
-    val rooms: List<RoomSummary> = emptyList()
+    val rooms: List<RoomSummary> = emptyList(),
+    val oidcAuthUrl: String? = null
 )
 
 class AuthViewModel(app: Application) : AndroidViewModel(app) {
 
     private val matrix = MatrixClient()
     private val sessions = SessionRepository(app.applicationContext)
-    private val prefs = app.getSharedPreferences("mtc_oidc", Context.MODE_PRIVATE)
+    private val prefs = app.getSharedPreferences("mtc_oidc_v2", Context.MODE_PRIVATE)
 
-    /** Pending OIDC auth (PKCE) while browser is open */
     private var oidcPending: OidcPendingAuth? = null
 
     private val _state = MutableStateFlow(AuthUiState())
@@ -71,7 +71,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun backToProvider() {
-        _state.value = _state.value.copy(step = AuthStep.PROVIDER, error = null)
+        _state.value = _state.value.copy(step = AuthStep.PROVIDER, error = null, oidcAuthUrl = null)
     }
 
     fun goPassword() {
@@ -83,7 +83,8 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun backToMethods() {
-        _state.value = _state.value.copy(step = AuthStep.METHODS, error = null)
+        oidcPending = null
+        _state.value = _state.value.copy(step = AuthStep.METHODS, error = null, oidcAuthUrl = null)
     }
 
     fun loginPassword(username: String, password: String) {
@@ -93,10 +94,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 onLoggedIn(matrix.loginPassword(hs.baseUrl, username, password))
             } catch (e: Exception) {
-                _state.value = _state.value.copy(
-                    isLoading = false,
-                    error = e.message ?: "Ошибка входа"
-                )
+                _state.value = _state.value.copy(isLoading = false, error = e.message ?: "Ошибка входа")
             }
         }
     }
@@ -116,29 +114,29 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Classic Matrix SSO */
     fun startSso(context: Context, idp: IdentityProvider?) {
         val hs = _state.value.homeserver ?: return
         if (hs.usesOidc) {
-            startOidc(context, forRegistration = false)
+            startOidc(forRegistration = false)
             return
         }
-        val url = matrix.ssoRedirectUrl(hs.baseUrl, OidcAuth.REDIRECT_URI, idp?.id)
-        CustomTabsIntent.Builder().build().launchUrl(context, android.net.Uri.parse(url))
+        val url = matrix.ssoRedirectUrl(hs.baseUrl, "mtc://login", idp?.id)
+        CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url))
     }
 
-    /** Modern OIDC / MAS login (matrix.nevetime.ru → auth.matrix.nevetime.ru) */
-    fun startOidc(context: Context, forRegistration: Boolean = false) {
+    fun startOidc(forRegistration: Boolean = false) {
         val hs = _state.value.homeserver ?: return
         val issuer = hs.oidcIssuer ?: return
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
                 val config = OidcAuth.discoverOidc(issuer)
-                val clientId = prefs.getString("client_id_$issuer", null)
-                    ?: OidcAuth.registerClient(config).clientId.also {
-                        prefs.edit().putString("client_id_$issuer", it).apply()
-                    }
+                val cacheKey = "client_id_${issuer}_v2"
+                var clientId = prefs.getString(cacheKey, null)
+                if (clientId == null) {
+                    clientId = OidcAuth.registerClient(config).clientId
+                    prefs.edit().putString(cacheKey, clientId).apply()
+                }
                 val (authUrl, pending) = OidcAuth.beginAuth(
                     config = config,
                     clientId = clientId,
@@ -146,10 +144,14 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                     forRegistration = forRegistration
                 )
                 oidcPending = pending
-                _state.value = _state.value.copy(isLoading = false)
-                CustomTabsIntent.Builder().build()
-                    .launchUrl(context, Uri.parse(authUrl))
+                _state.value = _state.value.copy(
+                    isLoading = false,
+                    step = AuthStep.OIDC_WEB,
+                    oidcAuthUrl = authUrl
+                )
             } catch (e: Exception) {
+                // Drop bad cached client_id so next try re-registers
+                prefs.edit().remove("client_id_${issuer}_v2").apply()
                 _state.value = _state.value.copy(
                     isLoading = false,
                     error = e.message ?: "OIDC login failed"
@@ -158,63 +160,75 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Handle deep link mtc://login?... */
-    fun handleSsoCallback(uri: Uri?) {
-        if (uri == null || uri.scheme != "mtc") return
-
-        // OIDC: ?code=...&state=...
+    fun onOidcRedirect(url: String) {
+        val uri = Uri.parse(url)
         val code = uri.getQueryParameter("code")
         val state = uri.getQueryParameter("state")
-        if (code != null) {
-            val pending = oidcPending
-            if (pending == null) {
-                _state.value = _state.value.copy(error = "Нет pending OIDC сессии. Повторите вход.")
-                return
-            }
-            if (state != null && state != pending.state) {
-                _state.value = _state.value.copy(error = "OIDC state mismatch")
-                return
-            }
-            viewModelScope.launch {
-                _state.value = _state.value.copy(isLoading = true, error = null)
-                try {
-                    val tokens = OidcAuth.exchangeCode(pending, code)
-                    val userId = OidcAuth.whoami(tokens.homeserverUrl, tokens.accessToken)
-                    oidcPending = null
-                    onLoggedIn(
-                        MatrixSession(
-                            userId = userId,
-                            accessToken = tokens.accessToken,
-                            deviceId = tokens.deviceId,
-                            homeserverUrl = tokens.homeserverUrl
-                        )
-                    )
-                } catch (e: Exception) {
-                    _state.value = _state.value.copy(
-                        isLoading = false,
-                        error = e.message ?: "OIDC token exchange failed"
-                    )
-                }
-            }
+        val error = uri.getQueryParameter("error_description")
+            ?: uri.getQueryParameter("error")
+
+        if (error != null) {
+            _state.value = _state.value.copy(
+                step = AuthStep.METHODS,
+                oidcAuthUrl = null,
+                error = error
+            )
+            return
+        }
+        if (code == null) return
+
+        val pending = oidcPending
+        if (pending == null) {
+            _state.value = _state.value.copy(
+                step = AuthStep.METHODS,
+                oidcAuthUrl = null,
+                error = "Нет pending OIDC сессии"
+            )
+            return
+        }
+        if (state != null && state != pending.state) {
+            _state.value = _state.value.copy(
+                step = AuthStep.METHODS,
+                oidcAuthUrl = null,
+                error = "OIDC state mismatch"
+            )
             return
         }
 
-        // Classic SSO: ?loginToken=...
-        val token = uri.getQueryParameter("loginToken") ?: return
-        val hs = _state.value.homeserver
-        if (hs == null) {
-            _state.value = _state.value.copy(error = "Нет homeserver для SSO callback")
-            return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(isLoading = true, error = null, oidcAuthUrl = null)
+            try {
+                val tokens = OidcAuth.exchangeCode(pending, code)
+                val userId = OidcAuth.whoami(tokens.homeserverUrl, tokens.accessToken)
+                oidcPending = null
+                onLoggedIn(
+                    MatrixSession(
+                        userId = userId,
+                        accessToken = tokens.accessToken,
+                        deviceId = tokens.deviceId,
+                        homeserverUrl = tokens.homeserverUrl
+                    )
+                )
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    isLoading = false,
+                    step = AuthStep.METHODS,
+                    error = e.message ?: "OIDC token exchange failed"
+                )
+            }
         }
+    }
+
+    fun handleSsoCallback(uri: Uri?) {
+        if (uri == null || uri.scheme != "mtc") return
+        val token = uri.getQueryParameter("loginToken") ?: return
+        val hs = _state.value.homeserver ?: return
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
                 onLoggedIn(matrix.loginWithToken(hs.baseUrl, token))
             } catch (e: Exception) {
-                _state.value = _state.value.copy(
-                    isLoading = false,
-                    error = e.message ?: "SSO login failed"
-                )
+                _state.value = _state.value.copy(isLoading = false, error = e.message ?: "SSO failed")
             }
         }
     }
@@ -225,7 +239,8 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
             isLoading = false,
             session = session,
             step = AuthStep.LOGGED_IN,
-            error = null
+            error = null,
+            oidcAuthUrl = null
         )
         refreshRooms()
     }
@@ -265,7 +280,5 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
     fun usesOidc(): Boolean = _state.value.homeserver?.usesOidc == true
 
     fun identityProviders(): List<IdentityProvider> =
-        _state.value.flows
-            .filter { it.type == "m.login.sso" }
-            .flatMap { it.identityProviders }
+        _state.value.flows.filter { it.type == "m.login.sso" }.flatMap { it.identityProviders }
 }

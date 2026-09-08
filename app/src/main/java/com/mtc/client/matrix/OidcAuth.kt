@@ -13,7 +13,12 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 
-const val OIDC_REDIRECT_URI = "mtc://login"
+/**
+ * MAS (matrix.nevetime.ru) rejects custom schemes like mtc://
+ * and only accepts http://127.0.0.1 / localhost for native clients.
+ * We open auth in a WebView and intercept this redirect.
+ */
+const val OIDC_REDIRECT_URI = "http://127.0.0.1:8787/callback"
 
 data class OidcConfig(
     val issuer: String,
@@ -72,6 +77,10 @@ object OidcAuth {
         val meta = JSONObject()
             .put("application_type", "native")
             .put("client_name", "Matrix Telegram")
+            .put("client_uri", "https://github.com/kekih/matrix-telegram-client")
+            .put("logo_uri", "https://github.com/kekih/matrix-telegram-client")
+            .put("tos_uri", "https://github.com/kekih/matrix-telegram-client")
+            .put("policy_uri", "https://github.com/kekih/matrix-telegram-client")
             .put("redirect_uris", org.json.JSONArray().put(OIDC_REDIRECT_URI))
             .put("token_endpoint_auth_method", "none")
             .put("grant_types", org.json.JSONArray().put("authorization_code").put("refresh_token"))
@@ -86,7 +95,10 @@ object OidcAuth {
         http.newCall(req).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                val err = try { JSONObject(body).optString("error_description") } catch (_: Exception) { body }
+                val err = try {
+                    val o = JSONObject(body)
+                    o.optString("error_description").ifBlank { o.optString("error") }
+                } catch (_: Exception) { body }
                 error("OIDC registration failed: ${err.ifBlank { resp.code.toString() }}")
             }
             OidcClient(clientId = JSONObject(body).getString("client_id"))
@@ -125,13 +137,9 @@ object OidcAuth {
             "code_challenge" to challenge,
             "code_challenge_method" to "S256"
         )
-        if (forRegistration) {
-            params["prompt"] = "create"
-        }
+        if (forRegistration) params["prompt"] = "create"
 
-        val query = params.entries.joinToString("&") { (k, v) ->
-            "${enc(k)}=${enc(v)}"
-        }
+        val query = params.entries.joinToString("&") { (k, v) -> "${enc(k)}=${enc(v)}" }
         val authUrl = "${config.authorizationEndpoint}?$query"
 
         val pending = OidcPendingAuth(
@@ -145,41 +153,35 @@ object OidcAuth {
         return authUrl to pending
     }
 
-    suspend fun exchangeCode(
-        pending: OidcPendingAuth,
-        code: String
-    ): OidcTokens = withContext(Dispatchers.IO) {
-        val form = FormBody.Builder()
-            .add("grant_type", "authorization_code")
-            .add("code", code)
-            .add("redirect_uri", pending.redirectUri)
-            .add("client_id", pending.clientId)
-            .add("code_verifier", pending.codeVerifier)
-            .build()
+    suspend fun exchangeCode(pending: OidcPendingAuth, code: String): OidcTokens =
+        withContext(Dispatchers.IO) {
+            val form = FormBody.Builder()
+                .add("grant_type", "authorization_code")
+                .add("code", code)
+                .add("redirect_uri", pending.redirectUri)
+                .add("client_id", pending.clientId)
+                .add("code_verifier", pending.codeVerifier)
+                .build()
 
-        val req = Request.Builder()
-            .url(pending.tokenEndpoint)
-            .post(form)
-            .build()
-
-        http.newCall(req).execute().use { resp ->
-            val body = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                val err = try {
-                    val o = JSONObject(body)
-                    o.optString("error_description").ifBlank { o.optString("error") }
-                } catch (_: Exception) { body }
-                error("Token exchange failed: ${err.ifBlank { resp.code.toString() }}")
+            val req = Request.Builder().url(pending.tokenEndpoint).post(form).build()
+            http.newCall(req).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    val err = try {
+                        val o = JSONObject(body)
+                        o.optString("error_description").ifBlank { o.optString("error") }
+                    } catch (_: Exception) { body }
+                    error("Token exchange failed: ${err.ifBlank { resp.code.toString() }}")
+                }
+                val o = JSONObject(body)
+                OidcTokens(
+                    accessToken = o.getString("access_token"),
+                    refreshToken = o.optString("refresh_token").takeIf { it.isNotBlank() },
+                    deviceId = pending.deviceId,
+                    homeserverUrl = pending.homeserverUrl
+                )
             }
-            val o = JSONObject(body)
-            OidcTokens(
-                accessToken = o.getString("access_token"),
-                refreshToken = o.optString("refresh_token").takeIf { it.isNotBlank() },
-                deviceId = pending.deviceId,
-                homeserverUrl = pending.homeserverUrl
-            )
         }
-    }
 
     suspend fun whoami(homeserverUrl: String, accessToken: String): String =
         withContext(Dispatchers.IO) {
