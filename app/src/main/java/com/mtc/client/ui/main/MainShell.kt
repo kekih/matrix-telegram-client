@@ -149,6 +149,7 @@ fun MainShell(
                 ChatScreen(
                     roomId = roomId,
                     roomName = room?.name ?: roomId,
+                    encrypted = room?.encrypted == true,
                     messages = messages,
                     loading = messagesLoading,
                     error = messagesError,

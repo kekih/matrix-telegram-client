@@ -9,6 +9,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -41,23 +42,14 @@ fun ChatListScreen(
         AlertDialog(
             onDismissRequest = { showLogoutDialog = false },
             title = { Text("Выйти из аккаунта?") },
-            text = {
-                Text("Сессия будет удалена с этого устройства. Вы сможете войти снова.")
-            },
+            text = { Text("Сессия будет удалена с этого устройства.") },
             confirmButton = {
-                TextButton(
-                    onClick = {
-                        showLogoutDialog = false
-                        onLogout()
-                    }
-                ) {
-                    Text("Выйти", color = Color(0xFFFF6B6B))
+                TextButton(onClick = { showLogoutDialog = false; onLogout() }) {
+                    Text("Выйти", color = TgDanger)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showLogoutDialog = false }) {
-                    Text("Отмена")
-                }
+                TextButton(onClick = { showLogoutDialog = false }) { Text("Отмена") }
             },
             containerColor = TgSidebar,
             titleContentColor = TgTextPrimary,
@@ -83,30 +75,25 @@ fun ChatListScreen(
             ) {
                 Text(
                     text = userId.removePrefix("@").take(1).uppercase().ifEmpty { "M" },
-                    color = Color.White,
+                    color = Color.Black,
                     fontWeight = FontWeight.Bold
                 )
             }
-            Spacer(Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = userId.ifBlank { "Matrix Telegram" },
+                    text = "Чаты",
                     color = TgTextPrimary,
                     fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    fontSize = 20.sp
                 )
-                Text("online", color = TgTextSecondary, fontSize = 12.sp)
+                Text(userId, color = TgTextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             IconButton(onClick = onRefresh) {
                 Text("⟳", color = TgTextSecondary, fontSize = 18.sp)
             }
             IconButton(onClick = { showLogoutDialog = true }) {
-                Icon(
-                    Icons.AutoMirrored.Filled.Logout,
-                    contentDescription = "Выйти",
-                    tint = TgTextSecondary
-                )
+                Icon(Icons.AutoMirrored.Filled.Logout, null, tint = TgTextSecondary)
             }
         }
 
@@ -130,31 +117,20 @@ fun ChatListScreen(
         when {
             roomsLoading && rooms.isEmpty() -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(color = TgAccent)
-                        Spacer(Modifier.height(12.dp))
-                        Text("Загрузка чатов…", color = TgTextSecondary, fontSize = 14.sp)
-                    }
+                    CircularProgressIndicator(color = TgAccent)
                 }
             }
             roomsError != null && rooms.isEmpty() -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(roomsError, color = Color(0xFFFF6B6B), fontSize = 14.sp)
-                        Spacer(Modifier.height(12.dp))
-                        TextButton(onClick = onRefresh) {
-                            Text("Повторить", color = TgAccent)
-                        }
+                        Text(roomsError, color = TgDanger, fontSize = 14.sp)
+                        TextButton(onClick = onRefresh) { Text("Повторить", color = TgAccent) }
                     }
                 }
             }
             rooms.isEmpty() -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        "Нет комнат\nНажмите ⟳ чтобы обновить",
-                        color = TgTextSecondary,
-                        fontSize = 14.sp
-                    )
+                    Text("Нет комнат", color = TgTextSecondary)
                 }
             }
             else -> {
@@ -195,6 +171,10 @@ private fun RoomItem(room: RoomSummary, onClick: () -> Unit) {
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (room.encrypted) {
+                    Icon(Icons.Default.Lock, null, tint = TgLock, modifier = Modifier.size(12.dp))
+                    Spacer(Modifier.width(4.dp))
+                }
                 Text(
                     room.name,
                     color = TgTextPrimary,
@@ -225,7 +205,7 @@ private fun RoomItem(room: RoomSummary, onClick: () -> Unit) {
                     ) {
                         Text(
                             room.unread.toString(),
-                            color = Color.White,
+                            color = Color.Black,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Medium
                         )
