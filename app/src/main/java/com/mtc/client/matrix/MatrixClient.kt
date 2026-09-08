@@ -1,6 +1,9 @@
 package com.mtc.client.matrix
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -44,34 +47,29 @@ data class RoomSummary(
 class MatrixClient(
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)
         .build()
 ) {
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
-    /** Resolve account provider → homeserver base URL via .well-known */
     suspend fun discoverHomeserver(provider: String): HomeserverConfig = withContext(Dispatchers.IO) {
         val cleaned = provider.trim()
             .removePrefix("https://")
             .removePrefix("http://")
             .trimEnd('/')
 
-        // 1) Try well-known
         try {
-            val wkUrl = "https://$cleaned/.well-known/matrix/client"
-            val body = get(wkUrl)
-            val obj = JSONObject(body)
-            val hs = obj.optJSONObject("m.homeserver")?.optString("base_url")?.trimEnd('/')
+            val body = get("https://$cleaned/.well-known/matrix/client")
+            val hs = JSONObject(body).optJSONObject("m.homeserver")
+                ?.optString("base_url")?.trimEnd('/')
             if (!hs.isNullOrBlank()) {
                 return@withContext HomeserverConfig(baseUrl = hs, serverName = cleaned)
             }
-        } catch (_: Exception) { /* fall through */ }
+        } catch (_: Exception) { }
 
-        // 2) Fallback: assume https://provider is the CS API
         HomeserverConfig(baseUrl = "https://$cleaned", serverName = cleaned)
     }
 
-    /** GET /_matrix/client/v3/login */
     suspend fun getLoginFlows(baseUrl: String): List<LoginFlow> = withContext(Dispatchers.IO) {
         val body = get("$baseUrl/_matrix/client/v3/login")
         val flows = JSONObject(body).optJSONArray("flows") ?: JSONArray()
@@ -96,29 +94,22 @@ class MatrixClient(
         }
     }
 
-    /** Password login */
     suspend fun loginPassword(
         baseUrl: String,
         user: String,
         password: String,
         deviceName: String = "Matrix Telegram"
     ): MatrixSession = withContext(Dispatchers.IO) {
-        val identifier = if (user.startsWith("@")) {
-            JSONObject().put("type", "m.id.user").put("user", user.substringBefore(":").removePrefix("@"))
-        } else {
-            JSONObject().put("type", "m.id.user").put("user", user)
-        }
+        val localpart = user.removePrefix("@").substringBefore(":")
+        val identifier = JSONObject().put("type", "m.id.user").put("user", localpart)
         val req = JSONObject()
             .put("type", "m.login.password")
             .put("identifier", identifier)
             .put("password", password)
             .put("initial_device_display_name", deviceName)
-
-        val body = post("$baseUrl/_matrix/client/v3/login", req.toString())
-        parseSession(body, baseUrl)
+        parseSession(post("$baseUrl/_matrix/client/v3/login", req.toString()), baseUrl)
     }
 
-    /** Exchange SSO loginToken for session */
     suspend fun loginWithToken(
         baseUrl: String,
         loginToken: String,
@@ -128,11 +119,9 @@ class MatrixClient(
             .put("type", "m.login.token")
             .put("token", loginToken)
             .put("initial_device_display_name", deviceName)
-        val body = post("$baseUrl/_matrix/client/v3/login", req.toString())
-        parseSession(body, baseUrl)
+        parseSession(post("$baseUrl/_matrix/client/v3/login", req.toString()), baseUrl)
     }
 
-    /** Build classic Matrix SSO redirect URL */
     fun ssoRedirectUrl(baseUrl: String, redirectUrl: String, idpId: String? = null): String {
         val encoded = java.net.URLEncoder.encode(redirectUrl, Charsets.UTF_8.name())
         return if (idpId.isNullOrBlank()) {
@@ -142,111 +131,182 @@ class MatrixClient(
         }
     }
 
-    /**
-     * Register with password.
-     * Handles dummy UIA stage commonly required by Synapse.
-     */
     suspend fun register(
         baseUrl: String,
         username: String,
         password: String,
         deviceName: String = "Matrix Telegram"
     ): MatrixSession = withContext(Dispatchers.IO) {
-        // First attempt without auth → get session + flows
         val initial = JSONObject()
             .put("username", username)
             .put("password", password)
             .put("initial_device_display_name", deviceName)
             .put("auth", JSONObject().put("type", "m.login.dummy"))
-
         try {
-            val body = post("$baseUrl/_matrix/client/v3/register", initial.toString())
-            return@withContext parseSession(body, baseUrl)
+            parseSession(post("$baseUrl/_matrix/client/v3/register", initial.toString()), baseUrl)
         } catch (e: MatrixApiException) {
-            // 401 with session → complete dummy auth
-            val err = e.json
-            val session = err?.optString("session")
+            val session = e.json?.optString("session")
             if (e.httpCode == 401 && !session.isNullOrBlank()) {
                 val retry = JSONObject()
                     .put("username", username)
                     .put("password", password)
                     .put("initial_device_display_name", deviceName)
-                    .put(
-                        "auth",
-                        JSONObject()
-                            .put("type", "m.login.dummy")
-                            .put("session", session)
-                    )
-                val body = post("$baseUrl/_matrix/client/v3/register", retry.toString())
-                return@withContext parseSession(body, baseUrl)
-            }
-            throw e
+                    .put("auth", JSONObject().put("type", "m.login.dummy").put("session", session))
+                parseSession(post("$baseUrl/_matrix/client/v3/register", retry.toString()), baseUrl)
+            } else throw e
         }
     }
 
-    /** Basic sync → room list */
-    suspend fun syncRooms(session: MatrixSession): List<RoomSummary> = withContext(Dispatchers.IO) {
-        val url = "${session.homeserverUrl}/_matrix/client/v3/sync?timeout=0&filter=" +
-            java.net.URLEncoder.encode(
-                """{"room":{"timeline":{"limit":1},"state":{"lazy_load_members":true}}}""",
-                Charsets.UTF_8.name()
-            )
+    /**
+     * Load rooms: try /sync, fall back to /joined_rooms + per-room state.
+     */
+    suspend fun loadRooms(session: MatrixSession): List<RoomSummary> = withContext(Dispatchers.IO) {
+        try {
+            val fromSync = syncRooms(session)
+            if (fromSync.isNotEmpty()) return@withContext fromSync
+        } catch (_: Exception) { }
+
+        loadRoomsViaJoined(session)
+    }
+
+    private fun syncRooms(session: MatrixSession): List<RoomSummary> {
+        // Minimal filter as JSON in query can break some proxies — use plain sync first
+        val url = "${session.homeserverUrl}/_matrix/client/v3/sync?timeout=0"
         val body = get(url, session.accessToken)
         val root = JSONObject(body)
-        val join = root.optJSONObject("rooms")?.optJSONObject("join") ?: return@withContext emptyList()
+        val join = root.optJSONObject("rooms")?.optJSONObject("join")
+            ?: return emptyList()
 
-        buildList {
+        return buildList {
             val keys = join.keys()
             while (keys.hasNext()) {
                 val roomId = keys.next()
                 val room = join.getJSONObject(roomId)
-                val timeline = room.optJSONObject("timeline")?.optJSONArray("events")
-                var lastMsg = ""
-                var ts = 0L
-                if (timeline != null && timeline.length() > 0) {
-                    val ev = timeline.getJSONObject(timeline.length() - 1)
-                    ts = ev.optLong("origin_server_ts", 0L)
-                    val content = ev.optJSONObject("content")
-                    lastMsg = content?.optString("body")
-                        ?: content?.optString("membership")
-                        ?: ev.optString("type", "")
-                }
-                val name = room.optJSONObject("state")?.optJSONArray("events")?.let { arr ->
-                    (0 until arr.length()).map { arr.getJSONObject(it) }
-                        .firstOrNull { it.optString("type") == "m.room.name" }
-                        ?.optJSONObject("content")?.optString("name")
-                } ?: roomId
-
-                val unread = room.optJSONObject("unread_notifications")
-                    ?.optInt("notification_count", 0) ?: 0
-
-                add(
-                    RoomSummary(
-                        roomId = roomId,
-                        name = name.ifBlank { roomId },
-                        lastMessage = lastMsg,
-                        timestamp = ts,
-                        unread = unread
-                    )
-                )
+                add(parseRoomFromSync(roomId, room))
             }
         }.sortedByDescending { it.timestamp }
+    }
+
+    private fun parseRoomFromSync(roomId: String, room: JSONObject): RoomSummary {
+        var lastMsg = ""
+        var ts = 0L
+        val timeline = room.optJSONObject("timeline")?.optJSONArray("events")
+        if (timeline != null && timeline.length() > 0) {
+            val ev = timeline.getJSONObject(timeline.length() - 1)
+            ts = ev.optLong("origin_server_ts", 0L)
+            val content = ev.optJSONObject("content")
+            lastMsg = when {
+                content == null -> ev.optString("type", "")
+                content.has("body") -> content.optString("body")
+                content.has("membership") -> content.optString("membership")
+                else -> ev.optString("type", "")
+            }
+        }
+
+        val stateEvents = room.optJSONObject("state")?.optJSONArray("events")
+        val name = resolveName(roomId, stateEvents, room.optJSONObject("summary"))
+        val unread = room.optJSONObject("unread_notifications")
+            ?.optInt("notification_count", 0) ?: 0
+
+        return RoomSummary(
+            roomId = roomId,
+            name = name,
+            lastMessage = lastMsg,
+            timestamp = ts,
+            unread = unread
+        )
+    }
+
+    private suspend fun loadRoomsViaJoined(session: MatrixSession): List<RoomSummary> =
+        coroutineScope {
+            val body = get(
+                "${session.homeserverUrl}/_matrix/client/v3/joined_rooms",
+                session.accessToken
+            )
+            val arr = JSONObject(body).optJSONArray("joined_rooms") ?: JSONArray()
+            val ids = (0 until arr.length()).map { arr.getString(it) }
+
+            // Cap parallel lookups to avoid hammering the server
+            ids.take(80).map { roomId ->
+                async {
+                    try {
+                        fetchRoomSummary(session, roomId)
+                    } catch (_: Exception) {
+                        RoomSummary(roomId, roomId, "", 0L, 0)
+                    }
+                }
+            }.awaitAll().sortedByDescending { it.timestamp }
+        }
+
+    private fun fetchRoomSummary(session: MatrixSession, roomId: String): RoomSummary {
+        val encoded = java.net.URLEncoder.encode(roomId, Charsets.UTF_8.name())
+
+        // Name from state
+        var name = roomId
+        try {
+            val stateBody = get(
+                "${session.homeserverUrl}/_matrix/client/v3/rooms/$encoded/state",
+                session.accessToken
+            )
+            val events = JSONArray(stateBody)
+            name = resolveName(roomId, events, null)
+        } catch (_: Exception) { }
+
+        // Last message from messages API
+        var lastMsg = ""
+        var ts = 0L
+        try {
+            val msgBody = get(
+                "${session.homeserverUrl}/_matrix/client/v3/rooms/$encoded/messages?dir=b&limit=1",
+                session.accessToken
+            )
+            val chunk = JSONObject(msgBody).optJSONArray("chunk")
+            if (chunk != null && chunk.length() > 0) {
+                val ev = chunk.getJSONObject(0)
+                ts = ev.optLong("origin_server_ts", 0L)
+                lastMsg = ev.optJSONObject("content")?.optString("body")
+                    ?: ev.optString("type", "")
+            }
+        } catch (_: Exception) { }
+
+        return RoomSummary(roomId, name, lastMsg, ts, 0)
+    }
+
+    private fun resolveName(roomId: String, stateEvents: JSONArray?, summary: JSONObject?): String {
+        if (stateEvents != null) {
+            for (i in 0 until stateEvents.length()) {
+                val ev = stateEvents.getJSONObject(i)
+                if (ev.optString("type") == "m.room.name") {
+                    val n = ev.optJSONObject("content")?.optString("name")
+                    if (!n.isNullOrBlank()) return n
+                }
+            }
+            for (i in 0 until stateEvents.length()) {
+                val ev = stateEvents.getJSONObject(i)
+                if (ev.optString("type") == "m.room.canonical_alias") {
+                    val a = ev.optJSONObject("content")?.optString("alias")
+                    if (!a.isNullOrBlank()) return a
+                }
+            }
+        }
+        val heroes = summary?.optJSONArray("m.heroes")
+        if (heroes != null && heroes.length() > 0) {
+            return heroes.getString(0)
+        }
+        return roomId
     }
 
     suspend fun sendText(session: MatrixSession, roomId: String, text: String) =
         withContext(Dispatchers.IO) {
             val txn = System.currentTimeMillis().toString()
-            val req = JSONObject()
-                .put("msgtype", "m.text")
-                .put("body", text)
+            val encoded = java.net.URLEncoder.encode(roomId, Charsets.UTF_8.name())
+            val req = JSONObject().put("msgtype", "m.text").put("body", text)
             put(
-                "${session.homeserverUrl}/_matrix/client/v3/rooms/$roomId/send/m.room.message/$txn",
+                "${session.homeserverUrl}/_matrix/client/v3/rooms/$encoded/send/m.room.message/$txn",
                 req.toString(),
                 session.accessToken
             )
         }
-
-    // ── HTTP helpers ──────────────────────────────────────────────
 
     private fun get(url: String, token: String? = null): String {
         val b = Request.Builder().url(url).get()

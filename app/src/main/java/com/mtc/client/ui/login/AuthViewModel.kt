@@ -2,7 +2,6 @@ package com.mtc.client.ui.login
 
 import android.app.Application
 import android.content.Context
-import android.content.Intent
 import android.net.Uri
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.lifecycle.AndroidViewModel
@@ -24,7 +23,9 @@ data class AuthUiState(
     val homeserver: HomeserverConfig? = null,
     val flows: List<LoginFlow> = emptyList(),
     val isLoading: Boolean = false,
+    val roomsLoading: Boolean = false,
     val error: String? = null,
+    val roomsError: String? = null,
     val session: MatrixSession? = null,
     val rooms: List<RoomSummary> = emptyList()
 )
@@ -86,8 +87,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
-                val session = matrix.loginPassword(hs.baseUrl, username, password)
-                onLoggedIn(session)
+                onLoggedIn(matrix.loginPassword(hs.baseUrl, username, password))
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
                     isLoading = false,
@@ -102,8 +102,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
-                val session = matrix.register(hs.baseUrl, username, password)
-                onLoggedIn(session)
+                onLoggedIn(matrix.register(hs.baseUrl, username, password))
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
                     isLoading = false,
@@ -113,16 +112,12 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Open Custom Tab for classic Matrix SSO */
     fun startSso(context: Context, idp: IdentityProvider?) {
         val hs = _state.value.homeserver ?: return
-        val redirect = "mtc://login"
-        val url = matrix.ssoRedirectUrl(hs.baseUrl, redirect, idp?.id)
-        val intent = CustomTabsIntent.Builder().build()
-        intent.launchUrl(context, Uri.parse(url))
+        val url = matrix.ssoRedirectUrl(hs.baseUrl, "mtc://login", idp?.id)
+        CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url))
     }
 
-    /** Handle deep link mtc://login?loginToken=... */
     fun handleSsoCallback(uri: Uri?) {
         if (uri == null || uri.scheme != "mtc") return
         val token = uri.getQueryParameter("loginToken") ?: return
@@ -134,8 +129,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
-                val session = matrix.loginWithToken(hs.baseUrl, token)
-                onLoggedIn(session)
+                onLoggedIn(matrix.loginWithToken(hs.baseUrl, token))
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
                     isLoading = false,
@@ -159,11 +153,19 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshRooms() {
         val session = _state.value.session ?: return
         viewModelScope.launch {
+            _state.value = _state.value.copy(roomsLoading = true, roomsError = null)
             try {
-                val rooms = matrix.syncRooms(session)
-                _state.value = _state.value.copy(rooms = rooms)
-            } catch (_: Exception) {
-                // keep previous list
+                val rooms = matrix.loadRooms(session)
+                _state.value = _state.value.copy(
+                    rooms = rooms,
+                    roomsLoading = false,
+                    roomsError = if (rooms.isEmpty()) "Комнат не найдено" else null
+                )
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    roomsLoading = false,
+                    roomsError = e.message ?: "Не удалось загрузить чаты"
+                )
             }
         }
     }

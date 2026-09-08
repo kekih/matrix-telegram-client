@@ -66,6 +66,8 @@ fun MtcApp(authViewModel: AuthViewModel) {
                     ChatListScreen(
                         userId = session?.userId ?: "",
                         rooms = state.rooms,
+                        roomsLoading = state.roomsLoading,
+                        roomsError = state.roomsError,
                         onChatClick = { roomId -> navController.navigate("chat/$roomId") },
                         onLogout = { authViewModel.logout() },
                         onRefresh = { authViewModel.refreshRooms() }

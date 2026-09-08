@@ -11,7 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -29,10 +29,42 @@ import java.util.*
 fun ChatListScreen(
     userId: String,
     rooms: List<RoomSummary>,
+    roomsLoading: Boolean = false,
+    roomsError: String? = null,
     onChatClick: (String) -> Unit,
     onLogout: () -> Unit,
     onRefresh: () -> Unit
 ) {
+    var showLogoutDialog by remember { mutableStateOf(false) }
+
+    if (showLogoutDialog) {
+        AlertDialog(
+            onDismissRequest = { showLogoutDialog = false },
+            title = { Text("Выйти из аккаунта?") },
+            text = {
+                Text("Сессия будет удалена с этого устройства. Вы сможете войти снова.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showLogoutDialog = false
+                        onLogout()
+                    }
+                ) {
+                    Text("Выйти", color = Color(0xFFFF6B6B))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLogoutDialog = false }) {
+                    Text("Отмена")
+                }
+            },
+            containerColor = TgSidebar,
+            titleContentColor = TgTextPrimary,
+            textContentColor = TgTextSecondary
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -56,7 +88,7 @@ fun ChatListScreen(
                 )
             }
             Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = userId.ifBlank { "Matrix Telegram" },
                     color = TgTextPrimary,
@@ -69,8 +101,12 @@ fun ChatListScreen(
             IconButton(onClick = onRefresh) {
                 Text("⟳", color = TgTextSecondary, fontSize = 18.sp)
             }
-            IconButton(onClick = onLogout) {
-                Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Выйти", tint = TgTextSecondary)
+            IconButton(onClick = { showLogoutDialog = true }) {
+                Icon(
+                    Icons.AutoMirrored.Filled.Logout,
+                    contentDescription = "Выйти",
+                    tint = TgTextSecondary
+                )
             }
         }
 
@@ -91,18 +127,41 @@ fun ChatListScreen(
             )
         )
 
-        if (rooms.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    "Нет комнат или идёт синхронизация…\nПотяните обновление (⟳)",
-                    color = TgTextSecondary,
-                    fontSize = 14.sp
-                )
+        when {
+            roomsLoading && rooms.isEmpty() -> {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = TgAccent)
+                        Spacer(Modifier.height(12.dp))
+                        Text("Загрузка чатов…", color = TgTextSecondary, fontSize = 14.sp)
+                    }
+                }
             }
-        } else {
-            LazyColumn(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
-                items(rooms, key = { it.roomId }) { room ->
-                    RoomItem(room, onClick = { onChatClick(room.roomId) })
+            roomsError != null && rooms.isEmpty() -> {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(roomsError, color = Color(0xFFFF6B6B), fontSize = 14.sp)
+                        Spacer(Modifier.height(12.dp))
+                        TextButton(onClick = onRefresh) {
+                            Text("Повторить", color = TgAccent)
+                        }
+                    }
+                }
+            }
+            rooms.isEmpty() -> {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        "Нет комнат\nНажмите ⟳ чтобы обновить",
+                        color = TgTextSecondary,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+            else -> {
+                LazyColumn(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
+                    items(rooms, key = { it.roomId }) { room ->
+                        RoomItem(room, onClick = { onChatClick(room.roomId) })
+                    }
                 }
             }
         }
@@ -127,14 +186,14 @@ private fun RoomItem(room: RoomSummary, onClick: () -> Unit) {
             contentAlignment = Alignment.Center
         ) {
             Text(
-                room.name.take(1).uppercase(),
+                room.name.take(1).uppercase().ifEmpty { "#" },
                 color = TgTextPrimary,
                 fontWeight = FontWeight.Medium,
                 fontSize = 18.sp
             )
         }
         Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
+        Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     room.name,
@@ -164,7 +223,12 @@ private fun RoomItem(room: RoomSummary, onClick: () -> Unit) {
                             .background(TgAccent)
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
-                        Text(room.unread.toString(), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                        Text(
+                            room.unread.toString(),
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
                     }
                 }
             }
