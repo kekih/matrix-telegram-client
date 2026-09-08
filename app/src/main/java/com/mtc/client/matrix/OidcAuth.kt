@@ -14,11 +14,11 @@ import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 
 /**
- * MAS (matrix.nevetime.ru) rejects custom schemes like mtc://
- * and only accepts http://127.0.0.1 / localhost for native clients.
- * We open auth in a WebView and intercept this redirect.
+ * HTTPS bridge hosted on GitHub Pages → deep link mtc://login
+ * MAS rejects custom schemes; accepts https redirect URIs.
  */
-const val OIDC_REDIRECT_URI = "http://127.0.0.1:8787/callback"
+const val OIDC_REDIRECT_URI =
+    "https://kekih.github.io/matrix-telegram-client/oidc/callback.html"
 
 data class OidcConfig(
     val issuer: String,

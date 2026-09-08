@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Matrix Telegram — redirect</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0e1621; color: #f5f5f5;
+           display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    .box { text-align: center; padding: 24px; }
+    a { color: #2aabee; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <p>Возврат в Matrix Telegram…</p>
+    <p id="hint"><a id="link" href="#">Открыть приложение</a></p>
+  </div>
+  <script>
+    (function () {
+      var q = new URLSearchParams(window.location.search);
+      var h = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+      function get(k) { return q.get(k) || h.get(k); }
+      var code = get('code');
+      var state = get('state');
+      var error = get('error_description') || get('error');
+      var url = 'mtc://login?';
+      if (code) url += 'code=' + encodeURIComponent(code);
+      if (state) url += (code ? '&' : '') + 'state=' + encodeURIComponent(state);
+      if (error) url += ((code || state) ? '&' : '') + 'error=' + encodeURIComponent(error);
+      document.getElementById('link').href = url;
+      window.location.replace(url);
+    })();
+  </script>
+</body>
+</html>

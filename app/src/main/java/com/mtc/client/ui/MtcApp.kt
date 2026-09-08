@@ -13,7 +13,6 @@ import com.mtc.client.ui.login.AccountProviderScreen
 import com.mtc.client.ui.login.AuthStep
 import com.mtc.client.ui.login.AuthViewModel
 import com.mtc.client.ui.login.LoginMethodsScreen
-import com.mtc.client.ui.login.OidcWebScreen
 import com.mtc.client.ui.login.PasswordAuthScreen
 
 @Composable
@@ -40,8 +39,8 @@ fun MtcApp(authViewModel: AuthViewModel) {
             onPasswordLogin = { authViewModel.goPassword() },
             onRegister = { authViewModel.goRegister() },
             onSso = { idp -> authViewModel.startSso(context, idp) },
-            onOidcLogin = { authViewModel.startOidc(forRegistration = false) },
-            onOidcRegister = { authViewModel.startOidc(forRegistration = true) }
+            onOidcLogin = { authViewModel.startOidc(context, forRegistration = false) },
+            onOidcRegister = { authViewModel.startOidc(context, forRegistration = true) }
         )
 
         AuthStep.PASSWORD -> PasswordAuthScreen(
@@ -61,17 +60,6 @@ fun MtcApp(authViewModel: AuthViewModel) {
             onBack = { authViewModel.backToMethods() },
             onSubmit = { u, p -> authViewModel.register(u, p) }
         )
-
-        AuthStep.OIDC_WEB -> {
-            val url = state.oidcAuthUrl
-            if (url != null) {
-                OidcWebScreen(
-                    authUrl = url,
-                    onRedirect = { authViewModel.onOidcRedirect(it) },
-                    onCancel = { authViewModel.backToMethods() }
-                )
-            }
-        }
 
         AuthStep.LOGGED_IN -> {
             val navController = rememberNavController()
