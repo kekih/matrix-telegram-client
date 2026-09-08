@@ -10,6 +10,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -17,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mtc.client.matrix.ChatMessage
@@ -28,6 +30,7 @@ import java.util.*
 fun ChatScreen(
     roomId: String,
     roomName: String,
+    encrypted: Boolean,
     messages: List<ChatMessage>,
     loading: Boolean,
     error: String?,
@@ -36,12 +39,38 @@ fun ChatScreen(
     onRefresh: () -> Unit
 ) {
     var input by remember { mutableStateOf("") }
+    var showE2eeInfo by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
+    if (showE2eeInfo) {
+        AlertDialog(
+            onDismissRequest = { showE2eeInfo = false },
+            title = { Text(if (encrypted) "Комната зашифрована" else "Без E2EE") },
+            text = {
+                Text(
+                    if (encrypted)
+                        "В этой комнате включено сквозное шифрование (Megolm). " +
+                            "Чтение и отправка требуют ключей устройства (Olm/Megolm). " +
+                            "Сейчас клиент ещё без crypto-движка matrix-rust-sdk — " +
+                            "поэтому чужие сообщения показываются как «🔒 Зашифрованное», " +
+                            "а открытый текст сюда не отправляется."
+                    else
+                        "В этой комнате шифрование не включено. Сообщения уходят открытым текстом."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showE2eeInfo = false }) {
+                    Text("OK", color = TgAccent)
+                }
+            },
+            containerColor = TgSidebar,
+            titleContentColor = TgTextPrimary,
+            textContentColor = TgTextSecondary
+        )
+    }
+
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
-        }
+        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
     }
 
     Column(
@@ -61,19 +90,42 @@ fun ChatScreen(
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = TgTextPrimary)
             }
             Box(
-                modifier = Modifier.size(40.dp).clip(CircleShape).background(TgInput),
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(TgAccent),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     roomName.take(1).uppercase().ifEmpty { "#" },
-                    color = TgTextPrimary,
-                    fontWeight = FontWeight.Medium
+                    color = Color.Black,
+                    fontWeight = FontWeight.Bold
                 )
             }
             Spacer(Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(roomName, color = TgTextPrimary, fontWeight = FontWeight.Medium, fontSize = 15.sp)
-                Text("Matrix", color = TgTextSecondary, fontSize = 12.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (encrypted) {
+                        Icon(
+                            Icons.Default.Lock,
+                            null,
+                            tint = TgLock,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text("Зашифровано", color = TgLock, fontSize = 12.sp)
+                    } else {
+                        Text("Matrix", color = TgTextSecondary, fontSize = 12.sp)
+                    }
+                }
+            }
+            IconButton(onClick = { showE2eeInfo = true }) {
+                Icon(
+                    Icons.Default.Lock,
+                    contentDescription = "Шифрование",
+                    tint = if (encrypted) TgLock else TgTextMeta
+                )
             }
             IconButton(onClick = onRefresh) {
                 Text("⟳", color = TgTextSecondary, fontSize = 18.sp)
@@ -91,8 +143,9 @@ fun ChatScreen(
                 error != null && messages.isEmpty() -> {
                     Text(
                         error,
-                        color = Color(0xFFFF6B6B),
-                        modifier = Modifier.align(Alignment.Center).padding(16.dp)
+                        color = TgDanger,
+                        modifier = Modifier.align(Alignment.Center).padding(16.dp),
+                        textAlign = TextAlign.Center
                     )
                 }
                 messages.isEmpty() -> {
@@ -116,6 +169,24 @@ fun ChatScreen(
             }
         }
 
+        if (error != null && messages.isNotEmpty()) {
+            Text(
+                error,
+                color = TgDanger,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+            )
+        }
+
+        if (encrypted) {
+            Text(
+                "🔒 E2EE-комната: открытый текст не отправляется (нужен Megolm)",
+                color = TgLock,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+            )
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -127,16 +198,25 @@ fun ChatScreen(
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
-                placeholder = { Text("Сообщение", color = TgTextMeta) },
+                placeholder = {
+                    Text(
+                        if (encrypted) "Шифрование скоро…" else "Сообщение",
+                        color = TgTextMeta
+                    )
+                },
+                enabled = !encrypted,
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(24.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedContainerColor = TgInput,
                     unfocusedContainerColor = TgInput,
+                    disabledContainerColor = TgInput,
                     focusedBorderColor = Color.Transparent,
                     unfocusedBorderColor = Color.Transparent,
+                    disabledBorderColor = Color.Transparent,
                     focusedTextColor = TgTextPrimary,
                     unfocusedTextColor = TgTextPrimary,
+                    disabledTextColor = TgTextMeta,
                     cursorColor = TgAccent
                 ),
                 maxLines = 4
@@ -145,18 +225,30 @@ fun ChatScreen(
             IconButton(
                 onClick = {
                     val t = input.trim()
-                    if (t.isNotEmpty()) {
+                    if (t.isNotEmpty() && !encrypted) {
                         onSend(t)
                         input = ""
+                    } else if (encrypted) {
+                        showE2eeInfo = true
                     }
                 },
-                enabled = input.isNotBlank(),
+                enabled = input.isNotBlank() || encrypted,
                 modifier = Modifier
                     .size(44.dp)
                     .clip(CircleShape)
-                    .background(if (input.isNotBlank()) TgAccent else TgInput)
+                    .background(
+                        when {
+                            encrypted -> TgInput
+                            input.isNotBlank() -> TgAccent
+                            else -> TgInput
+                        }
+                    )
             ) {
-                Icon(Icons.AutoMirrored.Filled.Send, null, tint = Color.White)
+                Icon(
+                    if (encrypted) Icons.Default.Lock else Icons.AutoMirrored.Filled.Send,
+                    null,
+                    tint = if (encrypted) TgLock else Color.Black
+                )
             }
         }
     }
@@ -174,7 +266,7 @@ private fun MessageBubble(msg: ChatMessage) {
             color = TgTextMeta,
             fontSize = 12.sp,
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            textAlign = TextAlign.Center
         )
         return
     }
@@ -207,12 +299,21 @@ private fun MessageBubble(msg: ChatMessage) {
                     color = if (msg.isEncrypted) TgTextSecondary else TgTextPrimary,
                     fontSize = 15.sp
                 )
-                Text(
-                    time,
-                    color = TgTextMeta,
-                    fontSize = 10.sp,
-                    modifier = Modifier.align(Alignment.End).padding(top = 2.dp)
-                )
+                Row(
+                    modifier = Modifier.align(Alignment.End).padding(top = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (msg.isEncrypted) {
+                        Icon(
+                            Icons.Default.Lock,
+                            null,
+                            tint = TgLock,
+                            modifier = Modifier.size(10.dp)
+                        )
+                        Spacer(Modifier.width(3.dp))
+                    }
+                    Text(time, color = TgTextMeta, fontSize = 10.sp)
+                }
             }
         }
     }
