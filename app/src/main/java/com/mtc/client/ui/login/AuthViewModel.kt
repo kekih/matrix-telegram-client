@@ -27,7 +27,15 @@ data class AuthUiState(
     val error: String? = null,
     val roomsError: String? = null,
     val session: MatrixSession? = null,
-    val rooms: List<RoomSummary> = emptyList()
+    val rooms: List<RoomSummary> = emptyList(),
+    val activeRoomId: String? = null,
+    val messages: List<ChatMessage> = emptyList(),
+    val messagesLoading: Boolean = false,
+    val messagesError: String? = null,
+    val profile: UserProfile? = null,
+    val profileLoading: Boolean = false,
+    val profileSaving: Boolean = false,
+    val profileError: String? = null
 )
 
 class AuthViewModel(app: Application) : AndroidViewModel(app) {
@@ -122,10 +130,6 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url))
     }
 
-    /**
-     * Real browser (Custom Tabs), no WebView.
-     * Local HTTP server on 127.0.0.1:8787 catches the OAuth redirect (RFC 8252).
-     */
     fun startOidc(context: Context, forRegistration: Boolean = false) {
         val hs = _state.value.homeserver ?: return
         val issuer = hs.oidcIssuer ?: return
@@ -146,25 +150,12 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                     forRegistration = forRegistration
                 )
                 oidcPending = pending
-
-                // 1) Listen on loopback
                 OidcAuth.startLoopbackServer()
-
-                // 2) Open system browser / Custom Tabs
-                CustomTabsIntent.Builder()
-                    .setShowTitle(true)
-                    .build()
+                CustomTabsIntent.Builder().setShowTitle(true).build()
                     .launchUrl(context, Uri.parse(authUrl))
 
-                _state.value = _state.value.copy(
-                    isLoading = true,
-                    error = null
-                )
-
-                // 3) Wait for browser redirect to 127.0.0.1:8787
                 val query = OidcAuth.awaitLoopbackQuery(180_000L)
                 val params = OidcAuth.parseQuery(query)
-
                 val err = params["error_description"] ?: params["error"]
                 if (err != null) {
                     _state.value = _state.value.copy(isLoading = false, error = err)
@@ -180,7 +171,6 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                     _state.value = _state.value.copy(isLoading = false, error = "OIDC state mismatch")
                     return@launch
                 }
-
                 val tokens = OidcAuth.exchangeCode(pending, code)
                 val userId = OidcAuth.whoami(tokens.homeserverUrl, tokens.accessToken)
                 oidcPending = null
@@ -243,6 +233,95 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                 _state.value = _state.value.copy(
                     roomsLoading = false,
                     roomsError = e.message ?: "Не удалось загрузить чаты"
+                )
+            }
+        }
+    }
+
+    fun openRoom(roomId: String) {
+        _state.value = _state.value.copy(activeRoomId = roomId, messages = emptyList())
+        loadMessages()
+    }
+
+    fun loadMessages() {
+        val session = _state.value.session ?: return
+        val roomId = _state.value.activeRoomId ?: return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(messagesLoading = true, messagesError = null)
+            try {
+                val msgs = matrix.loadMessages(session, roomId)
+                _state.value = _state.value.copy(messages = msgs, messagesLoading = false)
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    messagesLoading = false,
+                    messagesError = e.message ?: "Не удалось загрузить сообщения"
+                )
+            }
+        }
+    }
+
+    fun sendMessage(text: String) {
+        val session = _state.value.session ?: return
+        val roomId = _state.value.activeRoomId ?: return
+        viewModelScope.launch {
+            try {
+                matrix.sendText(session, roomId, text)
+                loadMessages()
+                refreshRooms()
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    messagesError = e.message ?: "Не удалось отправить"
+                )
+            }
+        }
+    }
+
+    fun loadProfile() {
+        val session = _state.value.session ?: return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(profileLoading = true, profileError = null)
+            try {
+                val p = matrix.getProfile(session)
+                _state.value = _state.value.copy(profile = p, profileLoading = false)
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    profileLoading = false,
+                    profileError = e.message ?: "Не удалось загрузить профиль"
+                )
+            }
+        }
+    }
+
+    fun saveDisplayName(name: String) {
+        val session = _state.value.session ?: return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(profileSaving = true, profileError = null)
+            try {
+                matrix.setDisplayName(session, name)
+                val p = matrix.getProfile(session)
+                _state.value = _state.value.copy(profile = p, profileSaving = false)
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    profileSaving = false,
+                    profileError = e.message ?: "Не удалось сохранить имя"
+                )
+            }
+        }
+    }
+
+    fun uploadAvatarBytes(bytes: ByteArray, mime: String = "image/jpeg") {
+        val session = _state.value.session ?: return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(profileSaving = true, profileError = null)
+            try {
+                val mxc = matrix.uploadAvatar(session, bytes, mime)
+                matrix.setAvatarUrl(session, mxc)
+                val p = matrix.getProfile(session)
+                _state.value = _state.value.copy(profile = p, profileSaving = false)
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    profileSaving = false,
+                    profileError = e.message ?: "Не удалось загрузить аватар"
                 )
             }
         }

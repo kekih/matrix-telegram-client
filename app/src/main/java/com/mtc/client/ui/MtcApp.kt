@@ -1,24 +1,36 @@
 package com.mtc.client.ui
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.rememberNavController
-import com.mtc.client.ui.chat.ChatListScreen
-import com.mtc.client.ui.chat.ChatScreen
 import com.mtc.client.ui.login.AccountProviderScreen
 import com.mtc.client.ui.login.AuthStep
 import com.mtc.client.ui.login.AuthViewModel
 import com.mtc.client.ui.login.LoginMethodsScreen
 import com.mtc.client.ui.login.PasswordAuthScreen
+import com.mtc.client.ui.main.MainShell
 
 @Composable
 fun MtcApp(authViewModel: AuthViewModel) {
     val state by authViewModel.state.collectAsState()
     val context = LocalContext.current
+
+    val avatarPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        try {
+            val mime = context.contentResolver.getType(uri) ?: "image/jpeg"
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            if (bytes != null) {
+                authViewModel.uploadAvatarBytes(bytes, mime)
+            }
+        } catch (_: Exception) { }
+    }
 
     when (state.step) {
         AuthStep.PROVIDER -> AccountProviderScreen(
@@ -61,31 +73,26 @@ fun MtcApp(authViewModel: AuthViewModel) {
             onSubmit = { u, p -> authViewModel.register(u, p) }
         )
 
-        AuthStep.LOGGED_IN -> {
-            val navController = rememberNavController()
-            val session = state.session
-            NavHost(navController = navController, startDestination = "chats") {
-                composable("chats") {
-                    ChatListScreen(
-                        userId = session?.userId ?: "",
-                        rooms = state.rooms,
-                        roomsLoading = state.roomsLoading,
-                        roomsError = state.roomsError,
-                        onChatClick = { roomId -> navController.navigate("chat/$roomId") },
-                        onLogout = { authViewModel.logout() },
-                        onRefresh = { authViewModel.refreshRooms() }
-                    )
-                }
-                composable("chat/{roomId}") { backStackEntry ->
-                    val roomId = backStackEntry.arguments?.getString("roomId") ?: return@composable
-                    val room = state.rooms.find { it.roomId == roomId }
-                    ChatScreen(
-                        roomId = roomId,
-                        roomName = room?.name ?: roomId,
-                        onBack = { navController.popBackStack() }
-                    )
-                }
-            }
-        }
+        AuthStep.LOGGED_IN -> MainShell(
+            userId = state.session?.userId ?: "",
+            rooms = state.rooms,
+            roomsLoading = state.roomsLoading,
+            roomsError = state.roomsError,
+            profile = state.profile,
+            profileLoading = state.profileLoading,
+            profileError = state.profileError,
+            profileSaving = state.profileSaving,
+            messages = state.messages,
+            messagesLoading = state.messagesLoading,
+            messagesError = state.messagesError,
+            onRefreshRooms = { authViewModel.refreshRooms() },
+            onOpenRoom = { authViewModel.openRoom(it) },
+            onSendMessage = { authViewModel.sendMessage(it) },
+            onRefreshMessages = { authViewModel.loadMessages() },
+            onLoadProfile = { authViewModel.loadProfile() },
+            onSaveDisplayName = { authViewModel.saveDisplayName(it) },
+            onPickAvatar = { avatarPicker.launch("image/*") },
+            onLogout = { authViewModel.logout() }
+        )
     }
 }
