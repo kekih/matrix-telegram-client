@@ -9,16 +9,20 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.PrintWriter
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.URLDecoder
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
-/**
- * HTTPS bridge hosted on GitHub Pages → deep link mtc://login
- * MAS rejects custom schemes; accepts https redirect URIs.
- */
-const val OIDC_REDIRECT_URI =
-    "https://kekih.github.io/matrix-telegram-client/oidc/callback.html"
+/** Loopback redirect — accepted by MAS, received by local ServerSocket */
+const val OIDC_REDIRECT_URI = "http://127.0.0.1:8787/callback"
 
 data class OidcConfig(
     val issuer: String,
@@ -27,9 +31,7 @@ data class OidcConfig(
     val registrationEndpoint: String?
 )
 
-data class OidcClient(
-    val clientId: String
-)
+data class OidcClient(val clientId: String)
 
 data class OidcPendingAuth(
     val codeVerifier: String,
@@ -50,6 +52,7 @@ data class OidcTokens(
 
 object OidcAuth {
     const val REDIRECT_URI = OIDC_REDIRECT_URI
+    private const val LOOPBACK_PORT = 8787
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -57,6 +60,9 @@ object OidcAuth {
         .build()
 
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
+
+    private var serverSocket: ServerSocket? = null
+    private val capturedQuery = AtomicReference<String?>(null)
 
     suspend fun discoverOidc(issuer: String): OidcConfig = withContext(Dispatchers.IO) {
         val base = issuer.trimEnd('/')
@@ -151,6 +157,92 @@ object OidcAuth {
             clientId = clientId
         )
         return authUrl to pending
+    }
+
+    /** Start loopback server before opening the browser */
+    fun startLoopbackServer() {
+        stopLoopbackServer()
+        capturedQuery.set(null)
+        val ss = ServerSocket(LOOPBACK_PORT, 1, InetAddress.getByName("127.0.0.1"))
+        serverSocket = ss
+        Thread({
+            try {
+                val socket: Socket = ss.accept()
+                handleClient(socket)
+            } catch (_: Exception) {
+            } finally {
+                try { ss.close() } catch (_: Exception) {}
+            }
+        }, "oidc-loopback").apply { isDaemon = true; start() }
+    }
+
+    fun stopLoopbackServer() {
+        try { serverSocket?.close() } catch (_: Exception) {}
+        serverSocket = null
+    }
+
+    /**
+     * Blocks until browser hits http://127.0.0.1:8787/callback?... or timeout.
+     * Returns full query string (without '?').
+     */
+    suspend fun awaitLoopbackQuery(timeoutMs: Long = 180_000L): String =
+        withContext(Dispatchers.IO) {
+            val start = System.currentTimeMillis()
+            while (System.currentTimeMillis() - start < timeoutMs) {
+                val q = capturedQuery.get()
+                if (q != null) {
+                    stopLoopbackServer()
+                    return@withContext q
+                }
+                Thread.sleep(150)
+            }
+            stopLoopbackServer()
+            error("Таймаут ожидания входа в браузере")
+        }
+
+    private fun handleClient(socket: Socket) {
+        socket.use { s ->
+            val reader = BufferedReader(InputStreamReader(s.getInputStream()))
+            val writer = PrintWriter(s.getOutputStream(), true)
+            val requestLine = reader.readLine() ?: return
+            // GET /callback?code=...&state=... HTTP/1.1
+            val path = requestLine.split(" ").getOrNull(1) ?: ""
+            val query = path.substringAfter('?', "")
+            capturedQuery.set(query)
+
+            // Drain headers
+            while (true) {
+                val line = reader.readLine() ?: break
+                if (line.isEmpty()) break
+            }
+
+            val html = """
+                <!DOCTYPE html><html><body style="font-family:sans-serif;background:#0e1621;color:#fff;text-align:center;padding:40px">
+                <h2>Можно закрыть эту вкладку</h2>
+                <p>Возвращаемся в Matrix Telegram…</p>
+                </body></html>
+            """.trimIndent()
+            writer.print("HTTP/1.1 200 OK\r\n")
+            writer.print("Content-Type: text/html; charset=utf-8\r\n")
+            writer.print("Connection: close\r\n")
+            writer.print("Content-Length: ${html.toByteArray().size}\r\n")
+            writer.print("\r\n")
+            writer.print(html)
+            writer.flush()
+        }
+    }
+
+    fun parseQuery(query: String): Map<String, String> {
+        if (query.isBlank()) return emptyMap()
+        return query.split('&').mapNotNull { part ->
+            val i = part.indexOf('=')
+            if (i <= 0) null
+            else {
+                val k = URLDecoder.decode(part.substring(0, i), Charsets.UTF_8.name())
+                val v = URLDecoder.decode(part.substring(i + 1), Charsets.UTF_8.name())
+                k to v
+            }
+        }.toMap()
     }
 
     suspend fun exchangeCode(pending: OidcPendingAuth, code: String): OidcTokens =

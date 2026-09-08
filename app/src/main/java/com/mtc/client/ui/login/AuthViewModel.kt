@@ -34,7 +34,9 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
 
     private val matrix = MatrixClient()
     private val sessions = SessionRepository(app.applicationContext)
-    private val prefs = app.getSharedPreferences("mtc_oidc_v3", Context.MODE_PRIVATE)
+    private val prefs = app.getSharedPreferences("mtc_oidc_v4", Context.MODE_PRIVATE)
+
+    private var oidcPending: OidcPendingAuth? = null
 
     private val _state = MutableStateFlow(AuthUiState())
     val state: StateFlow<AuthUiState> = _state.asStateFlow()
@@ -120,7 +122,10 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url))
     }
 
-    /** Opens system browser / Custom Tabs — no WebView */
+    /**
+     * Real browser (Custom Tabs), no WebView.
+     * Local HTTP server on 127.0.0.1:8787 catches the OAuth redirect (RFC 8252).
+     */
     fun startOidc(context: Context, forRegistration: Boolean = false) {
         val hs = _state.value.homeserver ?: return
         val issuer = hs.oidcIssuer ?: return
@@ -128,7 +133,7 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
                 val config = OidcAuth.discoverOidc(issuer)
-                val cacheKey = "client_id_${issuer}_v3"
+                val cacheKey = "client_id_${issuer}_v4"
                 var clientId = prefs.getString(cacheKey, null)
                 if (clientId == null) {
                     clientId = OidcAuth.registerClient(config).clientId
@@ -140,19 +145,56 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                     homeserverUrl = hs.baseUrl,
                     forRegistration = forRegistration
                 )
-                savePending(pending)
-                // Persist homeserver for callback if process is killed
-                prefs.edit()
-                    .putString("pending_hs", hs.baseUrl)
-                    .putString("pending_issuer", issuer)
-                    .apply()
-                _state.value = _state.value.copy(isLoading = false)
+                oidcPending = pending
+
+                // 1) Listen on loopback
+                OidcAuth.startLoopbackServer()
+
+                // 2) Open system browser / Custom Tabs
                 CustomTabsIntent.Builder()
                     .setShowTitle(true)
                     .build()
                     .launchUrl(context, Uri.parse(authUrl))
+
+                _state.value = _state.value.copy(
+                    isLoading = true,
+                    error = null
+                )
+
+                // 3) Wait for browser redirect to 127.0.0.1:8787
+                val query = OidcAuth.awaitLoopbackQuery(180_000L)
+                val params = OidcAuth.parseQuery(query)
+
+                val err = params["error_description"] ?: params["error"]
+                if (err != null) {
+                    _state.value = _state.value.copy(isLoading = false, error = err)
+                    return@launch
+                }
+                val code = params["code"]
+                    ?: run {
+                        _state.value = _state.value.copy(isLoading = false, error = "Нет code в callback")
+                        return@launch
+                    }
+                val state = params["state"]
+                if (state != null && state != pending.state) {
+                    _state.value = _state.value.copy(isLoading = false, error = "OIDC state mismatch")
+                    return@launch
+                }
+
+                val tokens = OidcAuth.exchangeCode(pending, code)
+                val userId = OidcAuth.whoami(tokens.homeserverUrl, tokens.accessToken)
+                oidcPending = null
+                onLoggedIn(
+                    MatrixSession(
+                        userId = userId,
+                        accessToken = tokens.accessToken,
+                        deviceId = tokens.deviceId,
+                        homeserverUrl = tokens.homeserverUrl
+                    )
+                )
             } catch (e: Exception) {
-                prefs.edit().remove("client_id_${issuer}_v3").apply()
+                OidcAuth.stopLoopbackServer()
+                prefs.edit().remove("client_id_${issuer}_v4").apply()
                 _state.value = _state.value.copy(
                     isLoading = false,
                     error = e.message ?: "OIDC login failed"
@@ -161,61 +203,10 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Deep link mtc://login?code=...&state=... (from HTTPS bridge page) */
     fun handleSsoCallback(uri: Uri?) {
         if (uri == null || uri.scheme != "mtc") return
-
-        val error = uri.getQueryParameter("error")
-        if (error != null) {
-            _state.value = _state.value.copy(error = error)
-            clearPending()
-            return
-        }
-
-        val code = uri.getQueryParameter("code")
-        if (code != null) {
-            val pending = loadPending()
-            if (pending == null) {
-                _state.value = _state.value.copy(error = "Сессия OIDC истекла — нажмите вход ещё раз")
-                return
-            }
-            val state = uri.getQueryParameter("state")
-            if (state != null && state != pending.state) {
-                _state.value = _state.value.copy(error = "OIDC state mismatch")
-                clearPending()
-                return
-            }
-            viewModelScope.launch {
-                _state.value = _state.value.copy(isLoading = true, error = null)
-                try {
-                    val tokens = OidcAuth.exchangeCode(pending, code)
-                    val userId = OidcAuth.whoami(tokens.homeserverUrl, tokens.accessToken)
-                    clearPending()
-                    onLoggedIn(
-                        MatrixSession(
-                            userId = userId,
-                            accessToken = tokens.accessToken,
-                            deviceId = tokens.deviceId,
-                            homeserverUrl = tokens.homeserverUrl
-                        )
-                    )
-                } catch (e: Exception) {
-                    _state.value = _state.value.copy(
-                        isLoading = false,
-                        error = e.message ?: "OIDC token exchange failed"
-                    )
-                }
-            }
-            return
-        }
-
-        // Classic SSO loginToken
         val token = uri.getQueryParameter("loginToken") ?: return
-        val hs = _state.value.homeserver
-        if (hs == null) {
-            _state.value = _state.value.copy(error = "Нет homeserver для SSO")
-            return
-        }
+        val hs = _state.value.homeserver ?: return
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
@@ -224,43 +215,6 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                 _state.value = _state.value.copy(isLoading = false, error = e.message ?: "SSO failed")
             }
         }
-    }
-
-    private fun savePending(p: OidcPendingAuth) {
-        prefs.edit()
-            .putString("p_verifier", p.codeVerifier)
-            .putString("p_state", p.state)
-            .putString("p_device", p.deviceId)
-            .putString("p_hs", p.homeserverUrl)
-            .putString("p_token_ep", p.tokenEndpoint)
-            .putString("p_client", p.clientId)
-            .putString("p_redirect", p.redirectUri)
-            .apply()
-    }
-
-    private fun loadPending(): OidcPendingAuth? {
-        val verifier = prefs.getString("p_verifier", null) ?: return null
-        val state = prefs.getString("p_state", null) ?: return null
-        val device = prefs.getString("p_device", null) ?: return null
-        val hs = prefs.getString("p_hs", null) ?: return null
-        val tokenEp = prefs.getString("p_token_ep", null) ?: return null
-        val client = prefs.getString("p_client", null) ?: return null
-        return OidcPendingAuth(
-            codeVerifier = verifier,
-            state = state,
-            deviceId = device,
-            homeserverUrl = hs,
-            tokenEndpoint = tokenEp,
-            clientId = client,
-            redirectUri = prefs.getString("p_redirect", OIDC_REDIRECT_URI) ?: OIDC_REDIRECT_URI
-        )
-    }
-
-    private fun clearPending() {
-        prefs.edit()
-            .remove("p_verifier").remove("p_state").remove("p_device")
-            .remove("p_hs").remove("p_token_ep").remove("p_client").remove("p_redirect")
-            .apply()
     }
 
     private fun onLoggedIn(session: MatrixSession) {
@@ -296,7 +250,8 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
 
     fun logout() {
         sessions.clear()
-        clearPending()
+        oidcPending = null
+        OidcAuth.stopLoopbackServer()
         _state.value = AuthUiState()
     }
 
