@@ -25,6 +25,9 @@ import com.mtc.client.ui.chat.ChatScreen
 import com.mtc.client.ui.profile.ProfileScreen
 import com.mtc.client.ui.settings.SettingsScreen
 import com.mtc.client.ui.theme.*
+import java.net.URLDecoder
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 
 private enum class Tab(val route: String, val label: String, val icon: ImageVector) {
     CHATS("chats", "Чаты", Icons.Default.ChatBubble),
@@ -114,7 +117,8 @@ fun MainShell(
                     roomsError = roomsError,
                     onChatClick = { roomId ->
                         onOpenRoom(roomId)
-                        navController.navigate("chat/$roomId")
+                        val encoded = URLEncoder.encode(roomId, StandardCharsets.UTF_8.toString())
+                        navController.navigate("chat/$encoded")
                     },
                     onLogout = onLogout,
                     onRefresh = onRefreshRooms
@@ -139,7 +143,8 @@ fun MainShell(
                 route = "chat/{roomId}",
                 arguments = listOf(navArgument("roomId") { type = NavType.StringType })
             ) { entry ->
-                val roomId = entry.arguments?.getString("roomId") ?: return@composable
+                val raw = entry.arguments?.getString("roomId") ?: return@composable
+                val roomId = URLDecoder.decode(raw, StandardCharsets.UTF_8.toString())
                 val room = rooms.find { it.roomId == roomId }
                 ChatScreen(
                     roomId = roomId,
